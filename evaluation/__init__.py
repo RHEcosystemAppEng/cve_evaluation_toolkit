@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+Evaluation framework for vulnerability analysis.
+
+This module provides tools and metrics for evaluating the quality of
+CVE analysis outputs, including:
+
+- Extractors: Parse markdown/JSON outputs into structured data
+- Runners: Execute metrics on analysis results
+- Metrics: LLM-based evaluation metrics for checklist and investigation quality
+- Model: LLM judge implementations for evaluation
+"""
+
+# Checklist metrics
+from evaluation.metrics.agent.checklist_metrics import (
+    ChecklistEvalInput,
+    ChecklistMetricSuite,
+    create_checklist_prompt_alignment_metric,
+    create_checklist_quality_metric,
+)
+
+# Investigation metrics
+from evaluation.metrics.agent.investigation_metrics import (
+    InvestigationEvalInput,
+    InvestigationMetricSuite,
+    TOOL_DESCRIPTIONS,
+    create_answer_quality_metric,  # create_reasoning_quality_metric,
+    create_tool_selection_quality_metric,
+)
+
+# Intel Score metrics
+from evaluation.metrics.agent.intel_score_metrics import (
+    IntelScoreEvalInput,
+    IntelScoreMetricSuite,
+    INTEL_SCORE_CRITERIA,
+    INTEL_SCORE_MAX_VALUES,
+    create_intel_score_fidelity_metric,
+)
+
+# Extractors
+from evaluation.extractors.data_extractor import (
+    ChecklistStep,
+    ChecklistStepDetail,
+    CVEAnalysisResult,
+    JSONExtractor,
+    MarkdownExtractor,
+    ToolCall,
+    extract_results,
+)
+
+# Judge models
+from evaluation.models.llm_judge import (
+    FireworksJudge,
+    DirectJudge,
+    JudgeConfig,
+    get_judge,
+)
+
+__all__ = [
+    # Checklist metrics
+    "ChecklistEvalInput",
+    "ChecklistMetricSuite",
+    "create_checklist_prompt_alignment_metric",
+    "create_checklist_quality_metric",  # Investigation metrics
+    "InvestigationEvalInput",
+    "InvestigationMetricSuite",
+    "TOOL_DESCRIPTIONS",
+    "create_answer_quality_metric",  # "create_reasoning_quality_metric",
+    "create_tool_selection_quality_metric",  # Intel Score metrics
+    "IntelScoreEvalInput",
+    "IntelScoreMetricSuite",
+    "INTEL_SCORE_CRITERIA",
+    "INTEL_SCORE_MAX_VALUES",
+    "create_intel_score_fidelity_metric",  # Extractors
+    "ChecklistStep",
+    "ChecklistStepDetail",
+    "CVEAnalysisResult",
+    "JSONExtractor",
+    "MarkdownExtractor",
+    "ToolCall",
+    "extract_results",  # Judge models
+    "FireworksJudge",
+    "DirectJudge",
+    "JudgeConfig",
+    "get_judge",
+]

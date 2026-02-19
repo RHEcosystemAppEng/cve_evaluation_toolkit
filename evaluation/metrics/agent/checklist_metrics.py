@@ -1,0 +1,200 @@
+"""
+Checklist Generation Evaluation Metrics.
+
+This module provides LLM-based metrics for evaluating
+the quality of generated investigation checklists for CVE analysis.
+
+Uses DeepEval's GEval and PromptAlignmentMetric for comprehensive evaluation.
+"""
+
+from typing import Any
+from typing import Optional
+
+from deepeval.metrics import GEval
+from deepeval.metrics import PromptAlignmentMetric
+from deepeval.models.base_model import DeepEvalBaseLLM
+from deepeval.test_case import LLMTestCase
+from deepeval.test_case import LLMTestCaseParams
+from pydantic import BaseModel
+from pydantic import Field
+
+# ============================================================================
+# Data Models
+# ============================================================================
+
+
+class ChecklistEvalInput(BaseModel):
+    """Input data for checklist evaluation."""
+
+    cve_id: str
+    cve_description: str
+    vulnerable_function: Optional[str] = None  # e.g., "PIL.ImageMath.eval"
+    vulnerable_package: Optional[str] = None  # e.g., "Pillow"
+    checklist_items: list[str] = Field(default_factory=list)
+    available_tools: list[str] = Field(default_factory=lambda: [
+        "Code Semantic Search", "Docs Semantic Search", "Code Keyword Search", "Call Chain Analyzer",
+        "Function Caller Finder", "Function Locator", "CVE Web Search"
+    ])
+
+
+# ============================================================================
+# LLM-Based Metrics (Using DeepEval)
+# ============================================================================
+
+
+def create_checklist_prompt_alignment_metric(judge_model: DeepEvalBaseLLM,
+                                             threshold: float = 0.7) -> PromptAlignmentMetric:
+    """
+    Create DeepEval PromptAlignmentMetric for checklist generation.
+
+    Based on https://deepeval.com/docs/metrics-prompt-alignment
+
+    Checks if generated checklist follows these prompt instructions:
+    1. Output is a comma-separated list in square brackets
+    2. Contains 3-5 items
+    3. Each item is a clear, answerable question
+    4. Items include specific technical names from CVE
+    """
+    return PromptAlignmentMetric(
+        prompt_instructions=[
+            # "Output must be a Python list format with items in quotes",
+            "The list must contain exactly 3 to 5 items",
+            "Each item must be a question starting with Is, Does, Are, Can, Has, or similar interrogative",
+            "Each question must be specific and include technical details (function names, package names)",
+            "Questions should be answerable by code search or documentation search tools",
+            "The first question should verify if the vulnerable function is called in the codebase"
+        ],
+        model=judge_model,
+        threshold=threshold,
+        include_reason=True)
+    # verbose_mode=True)
+
+
+def create_checklist_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
+    """
+    Create GEval metric for overall checklist quality assessment.
+
+    Evaluates semantic quality including relevance, completeness, actionability, and prioritization.
+    """
+    return GEval(name="Checklist Quality",
+                 criteria="""
+        Evaluate the quality of a CVE investigation checklist.
+
+        The INPUT contains a CVE description. The OUTPUT is a generated checklist.
+
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
+
+        Score based on these criteria:
+
+        1. RELEVANCE (0.30 weight):
+           - Are the questions directly relevant to the CVE vulnerability?
+           - Do they address the specific attack vector described?
+           - Do they focus on exploitability factors?
+
+        2. COMPLETENESS (0.25 weight):
+           - Does the checklist cover the vulnerability chain?
+             (presence → usage → reachability → exploitability)
+           - Are there any obvious missing investigation angles?
+
+        3. ACTIONABILITY (0.25 weight):
+           - Can each question be answered with code/docs analysis tools?
+           - Are the questions specific enough to get definitive answers?
+           - Would the answers help determine exploitability?
+
+        4. PRIORITIZATION (0.20 weight):
+           - Is the first question about the most critical check (vulnerable function usage)?
+           - Are questions ordered from most to least important?
+
+        Scoring Guide:
+        - 0.0-0.3: Poor - generic questions, misses CVE specifics
+        - 0.4-0.6: Adequate - covers basics but lacks depth
+        - 0.7-0.8: Good - relevant, specific, well-structured
+        - 0.9-1.0: Excellent - comprehensive, perfectly tailored to CVE
+        """,
+                 evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
+                 model=judge_model,
+                 threshold=threshold,
+                 verbose_mode=True)
+
+
+# ============================================================================
+# Metric Suite
+# ============================================================================
+
+
+class ChecklistMetricSuite:
+    """
+    Runs LLM-based checklist metrics and aggregates results.
+
+    Uses GEval for quality assessment and PromptAlignmentMetric for format compliance.
+    """
+
+    def __init__(self, judge_model: DeepEvalBaseLLM):
+        """
+        Initialize metric suite.
+
+        Args:
+            judge_model: DeepEval LLM model for evaluation
+        """
+        if judge_model is None:
+            raise ValueError("judge_model is required for ChecklistMetricSuite")
+
+        self.judge_model = judge_model
+        self.prompt_alignment = create_checklist_prompt_alignment_metric(judge_model)
+        self.quality_metric = create_checklist_quality_metric(judge_model)
+
+    def evaluate(self, input_data: ChecklistEvalInput) -> dict[str, Any]:
+        """
+        Run all metrics on a checklist.
+
+        Returns:
+            Dict with overall score, individual results, and summary
+        """
+        results = {}
+        checklist_str = "\n".join(f"- {item}" for item in input_data.checklist_items)
+
+        test_case = LLMTestCase(input=f"CVE: {input_data.cve_id}\nDescription: {input_data.cve_description}",
+                                actual_output=checklist_str)
+
+        # Prompt Alignment
+        try:
+            self.prompt_alignment.measure(test_case)
+            results["Prompt Alignment"] = {
+                "score": self.prompt_alignment.score,
+                "passed": self.prompt_alignment.score >= self.prompt_alignment.threshold,
+                "reason": self.prompt_alignment.reason,
+            }
+        except Exception as e:
+            results["Prompt Alignment"] = {
+                "score": 0.0,
+                "passed": False,
+                "reason": f"Error: {e}",
+            }
+
+        # Quality (GEval)
+        try:
+            self.quality_metric.measure(test_case)
+            results["Checklist Quality"] = {
+                "score": self.quality_metric.score,
+                "passed": self.quality_metric.score >= self.quality_metric.threshold,
+                "reason": self.quality_metric.reason,
+            }
+        except Exception as e:
+            results["Checklist Quality"] = {
+                "score": 0.0,
+                "passed": False,
+                "reason": f"Error: {e}",
+            }
+
+        # Calculate overall score
+        scores = [r["score"] for r in results.values()]
+        overall_score = sum(scores) / len(scores) if scores else 0
+        passed_count = sum(1 for r in results.values() if r["passed"])
+
+        return {
+            "overall_score": overall_score,
+            "passed": passed_count == len(results),
+            "passed_count": f"{passed_count}/{len(results)}",
+            "individual_results": results,
+            "cve_id": input_data.cve_id
+        }
