@@ -110,6 +110,8 @@ def create_summary_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) 
         CONTEXT provides the investigation results (checklist questions and responses).
         ACTUAL OUTPUT is the generated summary to evaluate.
 
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
+
         EVALUATION CRITERIA:
 
         1. STRUCTURE (25% weight):

@@ -180,7 +180,8 @@ def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float 
         """,
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
-                 threshold=threshold)
+                 threshold=threshold,
+                 verbose_mode=True)
 
 
 def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
@@ -248,7 +249,8 @@ def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: flo
         """,
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
-                 threshold=threshold)
+                 threshold=threshold,
+                 verbose_mode=True)
 
 
 def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
@@ -327,7 +329,8 @@ def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold
         """,
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
-                 threshold=threshold)
+                 threshold=threshold,
+                 verbose_mode=True)
 
 
 def create_tool_call_integrity_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
@@ -402,7 +405,8 @@ def create_tool_call_integrity_metric(judge_model: DeepEvalBaseLLM, threshold: f
         """,
         evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
         model=judge_model,
-        threshold=threshold
+        threshold=threshold,
+        verbose_mode=True
     )
 
 

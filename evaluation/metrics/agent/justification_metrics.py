@@ -127,6 +127,8 @@ def create_justification_metric(judge_model: DeepEvalBaseLLM, threshold: float =
         CONTEXT provides the investigation summary (the input to justification generation).
         ACTUAL OUTPUT is "Label: <label>\\n\\nReason: <reasoning>".
 
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
+
         EVALUATION CRITERIA:
 
         1. LABEL-SUMMARY CONSISTENCY (40% weight):
