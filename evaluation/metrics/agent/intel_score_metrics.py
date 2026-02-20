@@ -122,6 +122,8 @@ def create_intel_score_fidelity_metric(judge_model: DeepEvalBaseLLM, threshold: 
         INPUT: Original CVE data (description, CVSS, CWE)
         ACTUAL OUTPUT: Generated scores and justifications for 8 dimensions
 
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
+
         EVALUATION CRITERIA:
 
         1. EVIDENCE GROUNDING (60% weight):

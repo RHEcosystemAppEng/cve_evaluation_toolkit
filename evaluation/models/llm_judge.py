@@ -47,7 +47,7 @@ class JudgeConfig(BaseModel):
     """
     model_name: str = Field(
         # default="nvidia/nemotron-3-nano",
-        default="mistralai/mistral-small-3.1-24b-instruct-2503",
+        default="meta/llama-3.1-70b-instruct",
         description="Model name/path for the judge LLM")
     api_key: Optional[str] = Field(default=None, description="API key (defaults to NGC_API_KEY env var)")
     base_url: str = Field(default="https://integrate.api.nvidia.com/v1", description="API base URL (NVIDIA NIM)")

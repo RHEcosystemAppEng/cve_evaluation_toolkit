@@ -1,0 +1,14 @@
+[
+  {
+    "job_id": "3bc8e908-e502-4056-a0ee-92db3ed13bce",
+    "trace_id": "33c10ee8494c4dda9e923dc3f121b443",
+    "execution_start_timestamp": "2026-02-16T09:09:30.132437",
+    "cve": "CVE-2025-1094",
+    "component": "https://github.com/postgres/postgres",
+    "component_version": "b3b2bf3b9cc1f31170d3b4e21cb6ac0cf24bf90a",
+    "llm_node": "CALCULATE_CVE_SCORE",
+    "metric_name": "INTEL_SCORE_FIDELITY",
+    "metric_score": "0.9",
+    "metric_reasoning": "The response meets the Evidence Grounding criteria by citing specific facts from the CVE text, such as the affected PostgreSQL libpq functions and versions. The response also meets the Score Calibration criteria by accurately reflecting the level of detail in the CVE data, with high scores for technical specificity and component impact. However, the response could be improved by providing more detailed justifications for the clarity and mitigation scores."
+  }
+]

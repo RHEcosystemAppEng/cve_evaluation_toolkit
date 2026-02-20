@@ -15,26 +15,27 @@ This toolkit evaluates CVE analysis outputs across multiple dimensions:
 
 ### Multi-Stage Evaluation
 
-#### Stage 1: Checklist Generation (`CHECKLIST_GENERATION`)
+#### Stage 1: Intel Score (`CALCULATE_CVE_SCORE`)
+- **SCORE_FIDELITY** (0.8 threshold): Accuracy of CVSS-like scoring breakdown
+
+#### Stage 2: Checklist Generation (`CHECKLIST_GENERATION`)
 Evaluates the quality of generated investigation checklists:
 - **CHECKLIST_PROMPT_ALIGNMENT** (0.7 threshold): Measures how well the checklist aligns with CVE description
 - **CHECKLIST_QUALITY** (0.7 threshold): Assesses relevance, completeness, actionability, and prioritization
 
-#### Stage 2: Investigation (`AGENT_LOOP`)
+#### Stage 3: Investigation (`AGENT_LOOP`)
 Evaluates the agent's investigation process for each checklist question:
 - **AGENT_LOOP_ANSWER_QUALITY** (0.7 threshold): Relevancy and evidence support
 - **AGENT_LOOP_REASONING_QUALITY** (0.7 threshold): Logical coherence and goal focus
 - **AGENT_LOOP_TOOL_SELECTION_QUALITY** (0.7 threshold): Appropriateness and sequence of tool usage
 - **AGENT_LOOP_TOOL_CALL_INTEGRITY** (0.7 threshold): Syntactic correctness of tool calls
 
-#### Stage 3: Summary (`SUMMARIZE`)
+#### Stage 4: Summary (`SUMMARIZE`)
 - **SUMMARY_QUALITY** (0.7 threshold): Conciseness and coverage of key findings
 
-#### Stage 4: Justification (`JUSTIFICATION`)
+#### Stage 5: Justification (`JUSTIFICATION`)
 - **JUSTIFICATION_QUALITY** (0.7 threshold): Evidence support and logical soundness
 
-#### Stage 5: Intel Score (`CALCULATE_CVE_SCORE`)
-- **SCORE_FIDELITY** (0.8 threshold): Accuracy of CVSS-like scoring breakdown
 
 ### Flexible Execution Modes
 
@@ -91,7 +92,7 @@ Create a `.env` file or export the following:
 ```bash
 # Required for API mode
 export BASE="https://your-api-endpoint.com"
-export TOKEN="your-jwt-token"
+export TOKEN="your-token"
 
 # Required for LLM Judge
 export NGC_API_KEY="your-nvidia-api-key"
@@ -219,11 +220,11 @@ Each evaluation metric is submitted with for example:
 ```
 
 ### Valid llm_node Values
+- `CALCULATE_CVE_SCORE`
 - `CHECKLIST_GENERATION`
 - `AGENT_LOOP`
 - `SUMMARIZE`
 - `JUSTIFICATION`
-- `CALCULATE_CVE_SCORE`
 
 ### Valid metric_name Values
 See [Features](#features) section for complete list.
@@ -267,7 +268,7 @@ Each metric has a threshold (typically 0.7). A job "passes" a stage when all met
 #### 401 Unauthorized
 ```bash
 # Token expired, regenerate:
-export TOKEN=$(oc whoami -t)
+export TOKEN=$(oc create token...)
 ```
 
 #### 404 Not Found (NVIDIA API)

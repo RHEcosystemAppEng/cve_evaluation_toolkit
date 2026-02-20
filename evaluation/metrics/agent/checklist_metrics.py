@@ -62,12 +62,12 @@ def create_checklist_prompt_alignment_metric(judge_model: DeepEvalBaseLLM,
             "Each item must be a question starting with Is, Does, Are, Can, Has, or similar interrogative",
             "Each question must be specific and include technical details (function names, package names)",
             "Questions should be answerable by code search or documentation search tools",
-            "The first question should verify if the vulnerable function is called in the codebase"
+            "The first question should verify if the vulnerable function is called in the codebase",
         ],
         model=judge_model,
         threshold=threshold,
-        include_reason=True)
-    # verbose_mode=True)
+        include_reason=True,
+        verbose_mode=True)
 
 
 def create_checklist_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
