@@ -131,6 +131,8 @@ def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float 
         INPUT: A CVE investigation checklist question
         ACTUAL OUTPUT: The agent's investigation trace and final answer
 
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
+
         EVALUATION DIMENSIONS:
 
         A. RELEVANCY (50% weight):
@@ -198,6 +200,8 @@ def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: flo
         NOTE: If no intermediate steps are present, score based on whether the
         final answer shows logical reasoning and stays focused on the question.
 
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
+
         EVALUATION DIMENSIONS:
 
         A. LOGICAL COHERENCE (50% weight):
@@ -262,6 +266,8 @@ def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold
         ACTUAL OUTPUT: The agent's COMPLETE trace with tool sequence
 
         {TOOL_DESCRIPTIONS}
+
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
 
         EVALUATION CRITERIA (SEMANTIC ONLY - syntax is evaluated separately):
 
@@ -340,6 +346,8 @@ def create_tool_call_integrity_metric(judge_model: DeepEvalBaseLLM, threshold: f
         ACTUAL OUTPUT: The agent's trace showing tool calls
 
         {TOOL_DESCRIPTIONS}
+
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
 
         EVALUATION CRITERIA (SYNTAX ONLY, NOT SEMANTIC):
 
