@@ -1,0 +1,14 @@
+[
+  {
+    "job_id": "3bc8e908-e502-4056-a0ee-92db3ed13bce",
+    "trace_id": "33c10ee8494c4dda9e923dc3f121b443",
+    "execution_start_timestamp": "2026-02-16T09:09:30.132437",
+    "cve": "CVE-2025-1094",
+    "component": "https://github.com/postgres/postgres",
+    "component_version": "b3b2bf3b9cc1f31170d3b4e21cb6ac0cf24bf90a",
+    "llm_node": "SUMMARIZE",
+    "metric_name": "SUMMARY_QUALITY",
+    "metric_score": "0.8",
+    "metric_reasoning": "The response adheres to the required structure, starting with an explicit verdict statement and being 3-5 sentences long. The verdict accurately reflects the investigation findings, stating that the CVE is exploitable. The response also cites specific technical details, such as the use of PQescapeLiteral() and PQexec/PQexecParams functions, which are traceable to the investigation results. However, the response could be improved by providing more specific evidence from the investigation results to support the verdict."
+  }
+]
