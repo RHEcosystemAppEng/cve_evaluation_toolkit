@@ -1,0 +1,14 @@
+[
+  {
+    "job_id": "3bc8e908-e502-4056-a0ee-92db3ed13bce",
+    "trace_id": "33c10ee8494c4dda9e923dc3f121b443",
+    "execution_start_timestamp": "2026-02-16T09:09:30.132437",
+    "cve": "CVE-2025-1094",
+    "component": "https://github.com/postgres/postgres",
+    "component_version": "b3b2bf3b9cc1f31170d3b4e21cb6ac0cf24bf90a",
+    "llm_node": "JUSTIFICATION",
+    "metric_name": "JUSTIFICATION_QUALITY",
+    "metric_score": "1.0",
+    "metric_reasoning": "The label 'vulnerable' is consistent with the summary verdict, and it is one of the valid categories. The reason cites specific evidence from the summary, such as the use of PQescapeLiteral() and PQexec/PQexecParams functions without proper sanitization and escaping, and aligns with the technical details in the summary. The reason logically supports the chosen label, and they are aligned, considering the specific requirements for the 'vulnerable' label category. The Actual Output reflects the Context well, demonstrating strong Label-Summary Consistency, Reason-Summary Faithfulness, and Label-Reason Consistency."
+  }
+]
