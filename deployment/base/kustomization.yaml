@@ -4,16 +4,18 @@ kind: Kustomization
 namespace: cve-evaluation
 
 resources:
-  - deployment.yaml
-  - configmap.yaml
-  - secret.yaml
+- deployment.yaml
+- configmap.yaml
+- secret.yaml
 
-commonLabels:
-  app: cve-evaluation
-  component: evaluation-service
-  managed-by: kustomize
 
 images:
-  - name: cve-evaluation
-    newName: quay.io/your-org/cve-evaluation
-    newTag: latest
+- name: cve-evaluation
+  newName: quay.io/your-org/cve-evaluation
+  newTag: latest
+labels:
+- includeSelectors: true
+  pairs:
+    app: cve-evaluation
+    component: evaluation-service
+    managed-by: kustomize
