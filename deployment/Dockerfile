@@ -4,7 +4,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 WORKDIR /app
 
 # Copy dependency files
-COPY pyproject.toml .python-version ./
+COPY pyproject.toml uv.lock .python-version README.md ./
 
 # Install dependencies
 RUN uv sync --frozen --no-dev --no-install-project
@@ -42,5 +42,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import sys; sys.exit(0)"
 
 # Default command
-ENTRYPOINT ["python", "scripts/run_evaluation.py"]
+ENTRYPOINT ["python", "scripts/run_cve_evaluation.py"]
 CMD ["--mode", "api", "--stages", "all", "--submit"]
