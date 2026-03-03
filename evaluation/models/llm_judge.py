@@ -26,6 +26,7 @@ from typing import Optional
 
 from deepeval.models.base_model import DeepEvalBaseLLM
 from openai import OpenAI
+from openai import APIError, APIConnectionError, RateLimitError, AuthenticationError, BadRequestError
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -77,16 +78,27 @@ class FireworksJudge(DeepEvalBaseLLM):
 
         Args:
             config: Optional configuration (uses defaults if not provided)
+            
+        Raises:
+            ValueError: If API key is not provided
         """
         self.config = config or JudgeConfig()
         api_key = self.config.api_key or os.environ.get("NGC_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
 
         if not api_key:
-            logger.warning("No API key provided - judge will fail on generate()")
-            logger.warning("Please set NGC_API_KEY environment variable")
+            logger.error("ERROR: NGC API key is required but not provided")
+            logger.error("Please set NGC_API_KEY environment variable:")
+            logger.error("  export NGC_API_KEY='your-nvidia-api-key'")
+            logger.error("")
+            logger.error("You can get an API key from: https://build.nvidia.com/")
+            raise ValueError("NGC_API_KEY environment variable must be set")
 
-        self.client = OpenAI(api_key=api_key, base_url=self.config.base_url)
-        logger.debug(f"Initialized Judge with model: {self.config.model_name} at {self.config.base_url}")
+        try:
+            self.client = OpenAI(api_key=api_key, base_url=self.config.base_url)
+            logger.debug(f"Initialized Judge with model: {self.config.model_name} at {self.config.base_url}")
+        except Exception as e:
+            logger.error("Failed to initialize OpenAI client: %s", str(e))
+            raise
 
     def load_model(self):
         """Return the OpenAI client."""
@@ -94,29 +106,79 @@ class FireworksJudge(DeepEvalBaseLLM):
 
     def generate(self, prompt: str) -> str:
         """
-        Synchronous generation.
+        Synchronous generation with comprehensive error handling.
 
         Args:
             prompt: The prompt to send to the model
 
         Returns:
             Generated text response
+            
+        Raises:
+            AuthenticationError: If API key is invalid
+            RateLimitError: If rate limit is exceeded
+            APIConnectionError: If connection to API fails
+            APIError: For other API errors
         """
         logger.debug(f"Generating response (prompt length: {len(prompt)})")
-        response = self.client.chat.completions.create(model=self.config.model_name,
-                                                       messages=[{
-                                                           "role": "user", "content": prompt
-                                                       }],
-                                                       temperature=self.config.temperature,
-                                                       max_tokens=self.config.max_tokens)
-        content = response.choices[0].message.content
+        
+        # Warn if prompt is very long (approximate token limit check)
+        if len(prompt) > 100000:
+            logger.warning("Prompt is very long (%d chars), may exceed token limit", len(prompt))
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.model_name,
+                messages=[{
+                    "role": "user", "content": prompt
+                }],
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                timeout=120.0
+            )
+            content = response.choices[0].message.content
 
-        # Handle thinking tags (if model uses them)
-        if content and "<think>" in content and "</think>" in content:
-            content = content.split("</think>")[-1].strip()
-            logger.debug("Stripped thinking tags from response")
+            # Handle thinking tags (if model uses them)
+            if content and "<think>" in content and "</think>" in content:
+                content = content.split("</think>")[-1].strip()
+                logger.debug("Stripped thinking tags from response")
 
-        return content or ""
+            return content or ""
+            
+        except AuthenticationError as e:
+            logger.error("Authentication failed with NGC API")
+            logger.error("Please check that NGC_API_KEY environment variable is set correctly")
+            logger.error("Error details: %s", str(e))
+            raise
+        except RateLimitError as e:
+            logger.error("NGC API rate limit exceeded")
+            logger.error("Please wait a few minutes and try again, or reduce batch size with --limit")
+            logger.error("Error details: %s", str(e))
+            raise
+        except APIConnectionError as e:
+            logger.error("Failed to connect to NGC API at: %s", self.config.base_url)
+            logger.error("Please check:")
+            logger.error("  1. Network connection is working")
+            logger.error("  2. API endpoint URL is correct: %s", self.config.base_url)
+            logger.error("  3. No firewall blocking the connection")
+            logger.error("Error details: %s", str(e))
+            raise
+        except BadRequestError as e:
+            error_msg = str(e)
+            if "model_not_found" in error_msg or "model" in error_msg.lower():
+                logger.error("Model not found: %s", self.config.model_name)
+                logger.error("Please verify the model name is correct")
+                logger.error("Common models: meta/llama-3.1-70b-instruct, mistralai/mistral-small-3.1-24b-instruct-2503")
+            else:
+                logger.error("Bad request to NGC API: %s", error_msg)
+            raise
+        except APIError as e:
+            logger.error("NGC API error occurred: %s", str(e))
+            logger.error("This may be a temporary service issue, please try again later")
+            raise
+        except Exception as e:
+            logger.error("Unexpected error during LLM generation: %s", str(e), exc_info=True)
+            raise
 
     async def a_generate(self, prompt: str) -> str:
         """
@@ -148,16 +210,28 @@ class DirectJudge:
 
         Args:
             config: Optional configuration (uses defaults if not provided)
+            
+        Raises:
+            ValueError: If API key is not provided
         """
         self.config = config or JudgeConfig()
         api_key = self.config.api_key or os.environ.get("NGC_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
 
-        self.client = OpenAI(api_key=api_key, base_url=self.config.base_url)
-        logger.debug(f"Initialized DirectJudge with model: {self.config.model_name}")
+        if not api_key:
+            logger.error("ERROR: NGC API key is required but not provided")
+            logger.error("Please set NGC_API_KEY environment variable")
+            raise ValueError("NGC_API_KEY environment variable must be set")
+
+        try:
+            self.client = OpenAI(api_key=api_key, base_url=self.config.base_url)
+            logger.debug(f"Initialized DirectJudge with model: {self.config.model_name}")
+        except Exception as e:
+            logger.error("Failed to initialize OpenAI client: %s", str(e))
+            raise
 
     def judge(self, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         """
-        Execute a judgment with structured output.
+        Execute a judgment with structured output and error handling.
 
         Args:
             prompt: User prompt for the judgment
@@ -165,6 +239,12 @@ class DirectJudge:
 
         Returns:
             Dict with raw_response, thinking (if any), and usage stats
+            
+        Raises:
+            AuthenticationError: If API key is invalid
+            RateLimitError: If rate limit is exceeded
+            APIConnectionError: If connection to API fails
+            APIError: For other API errors
         """
         messages: List[Dict[str, str]] = []
         if system_prompt:
@@ -172,28 +252,56 @@ class DirectJudge:
         messages.append({"role": "user", "content": prompt})
 
         logger.debug(f"Executing judgment (prompt length: {len(prompt)})")
-        response = self.client.chat.completions.create(model=self.config.model_name,
-                                                       messages=messages,
-                                                       temperature=self.config.temperature,
-                                                       max_tokens=self.config.max_tokens)
+        
+        # Warn if prompt is very long
+        if len(prompt) > 100000:
+            logger.warning("Prompt is very long (%d chars), may exceed token limit", len(prompt))
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.model_name,
+                messages=messages,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                timeout=120.0
+            )
 
-        content = response.choices[0].message.content
+            content = response.choices[0].message.content
 
-        # Parse thinking tags if present
-        thinking = ""
-        if "<think>" in content and "</think>" in content:
-            thinking = content.split("<think>")[1].split("</think>")[0]
-            content = content.split("</think>")[-1].strip()
+            # Parse thinking tags if present
+            thinking = ""
+            if "<think>" in content and "</think>" in content:
+                thinking = content.split("<think>")[1].split("</think>")[0]
+                content = content.split("</think>")[-1].strip()
 
-        return {
-            "raw_response": content,
-            "thinking": thinking,
-            "usage": {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens
+            return {
+                "raw_response": content,
+                "thinking": thinking,
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
             }
-        }
+            
+        except AuthenticationError as e:
+            logger.error("Authentication failed with NGC API")
+            logger.error("Please check that NGC_API_KEY environment variable is set correctly")
+            raise
+        except RateLimitError as e:
+            logger.error("NGC API rate limit exceeded")
+            logger.error("Please wait and try again, or reduce batch size")
+            raise
+        except APIConnectionError as e:
+            logger.error("Failed to connect to NGC API at: %s", self.config.base_url)
+            logger.error("Please check network connection and API endpoint")
+            raise
+        except APIError as e:
+            logger.error("NGC API error: %s", str(e))
+            raise
+        except Exception as e:
+            logger.error("Unexpected error during judgment: %s", str(e), exc_info=True)
+            raise
 
 
 def get_judge(judge_type: str = "fireworks", **kwargs) -> DeepEvalBaseLLM:

@@ -25,6 +25,7 @@ from typing import Optional
 import httpx
 from pydantic import BaseModel
 from pydantic import Field
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Logger with compatibility for both old and new structure
 try:
@@ -72,9 +73,15 @@ class ExploitIQClient:
             headers["Authorization"] = f"Bearer {self.config.token}"
         return headers
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        reraise=True
+    )
     async def fetch_jobs(self, status: str = "completed", limit: Optional[int] = None) -> list[dict[str, Any]]:
         """
-        Fetch jobs from the API.
+        Fetch jobs from the API with automatic retry on timeout/connection errors.
 
         Args:
             status: Filter by job status (default: "completed")
@@ -97,13 +104,52 @@ class ExploitIQClient:
                 jobs = response.json()
                 logger.info("Fetched %d jobs", len(jobs) if isinstance(jobs, list) else 1)
                 return jobs if isinstance(jobs, list) else [jobs]
+            except httpx.TimeoutException:
+                logger.error("Request timed out after %d seconds when fetching jobs", self.config.timeout)
+                logger.error("The API server may be overloaded or unreachable")
+                logger.error("Try increasing timeout or check server status")
+                raise
+            except httpx.ConnectError as e:
+                logger.error("Failed to connect to API at: %s", url)
+                logger.error("Please check:")
+                logger.error("  1. Network connection is working")
+                logger.error("  2. BASE_URL is correct: %s", self.base_url)
+                logger.error("  3. No firewall blocking the connection")
+                logger.error("Error: %s", str(e))
+                raise
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code
+                if status_code == 401:
+                    logger.error("Authentication failed (401 Unauthorized)")
+                    logger.error("Please check your API_TOKEN environment variable")
+                elif status_code == 403:
+                    logger.error("Access forbidden (403 Forbidden)")
+                    logger.error("Your API token may not have permission to access this resource")
+                elif status_code == 404:
+                    logger.error("API endpoint not found (404)")
+                    logger.error("Please verify the BASE_URL is correct: %s", self.base_url)
+                elif status_code == 429:
+                    logger.error("Rate limit exceeded (429 Too Many Requests)")
+                    logger.error("Please wait a few minutes before trying again")
+                elif status_code >= 500:
+                    logger.error("Server error (%d)", status_code)
+                    logger.error("The API service may be temporarily unavailable")
+                else:
+                    logger.error("HTTP error %d: %s", status_code, e.response.text)
+                raise
             except httpx.HTTPError as e:
-                logger.error("Failed to fetch jobs: %s", e)
+                logger.error("HTTP error when fetching jobs: %s", str(e))
                 raise
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        reraise=True
+    )
     async def fetch_job_by_id(self, job_id: str) -> dict[str, Any]:
         """
-        Fetch a specific job by job_id.
+        Fetch a specific job by job_id with automatic retry.
 
         Args:
             job_id: Job identifier
@@ -130,13 +176,39 @@ class ExploitIQClient:
                 else:
                     logger.error("No job found with job_id=%s", job_id)
                     raise ValueError(f"Job not found: {job_id}")
+            except httpx.TimeoutException:
+                logger.error("Request timed out when fetching job %s", job_id)
+                logger.error("The API server may be overloaded or unreachable")
+                raise
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code
+                if status_code == 401:
+                    logger.error("Authentication failed (401)")
+                    logger.error("Please check your API_TOKEN")
+                elif status_code == 404:
+                    logger.error("Job not found (404): %s", job_id)
+                    logger.error("The job may not exist or has been deleted")
+                elif status_code == 429:
+                    logger.error("Rate limit exceeded (429)")
+                    logger.error("Please wait before trying again")
+                elif status_code >= 500:
+                    logger.error("Server error (%d)", status_code)
+                else:
+                    logger.error("HTTP error %d: %s", status_code, e.response.text)
+                raise
             except httpx.HTTPError as e:
-                logger.error("Failed to fetch job %s: %s", job_id, e)
+                logger.error("Failed to fetch job %s: %s", job_id, str(e))
                 raise
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        reraise=True
+    )
     async def fetch_traces(self, job_id: str) -> list[dict[str, Any]]:
         """
-        Fetch traces for a specific job.
+        Fetch traces for a specific job with automatic retry.
 
         Args:
             job_id: Job identifier
@@ -156,8 +228,22 @@ class ExploitIQClient:
                 traces = response.json()
                 logger.info("Fetched %d traces for job %s", len(traces) if isinstance(traces, list) else 0, job_id)
                 return traces if isinstance(traces, list) else []
+            except httpx.TimeoutException:
+                logger.error("Request timed out when fetching traces for job %s", job_id)
+                raise
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code
+                if status_code == 401:
+                    logger.error("Authentication failed (401)")
+                elif status_code == 404:
+                    logger.error("Traces not found for job %s (404)", job_id)
+                elif status_code >= 500:
+                    logger.error("Server error (%d)", status_code)
+                else:
+                    logger.error("HTTP error %d: %s", status_code, e.response.text)
+                raise
             except httpx.HTTPError as e:
-                logger.error("Failed to fetch traces for job %s: %s", job_id, e)
+                logger.error("Failed to fetch traces for job %s: %s", job_id, str(e))
                 raise
 
     async def submit_evaluation(self,
@@ -223,14 +309,40 @@ class ExploitIQClient:
                 result = response.json()
                 logger.info("Successfully submitted evaluation for job %s", job_id)
                 return result
+            except httpx.TimeoutException:
+                logger.error("Request timed out when submitting evaluation for job %s", job_id)
+                logger.error("The evaluation data may be too large or server is slow")
+                raise
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code
+                response_text = e.response.text if hasattr(e, 'response') else 'N/A'
+                
+                if status_code == 400:
+                    logger.error("Bad request (400) when submitting evaluation")
+                    logger.error("The payload format may be incorrect")
+                    logger.error("Response: %s", response_text)
+                elif status_code == 401:
+                    logger.error("Authentication failed (401)")
+                    logger.error("Please check your API_TOKEN")
+                elif status_code == 413:
+                    logger.error("Payload too large (413)")
+                    logger.error("Try reducing the number of metrics or data size")
+                elif status_code == 429:
+                    logger.error("Rate limit exceeded (429)")
+                    logger.error("Please wait before submitting more evaluations")
+                elif status_code >= 500:
+                    logger.error("Server error (%d)", status_code)
+                    logger.error("Response: %s", response_text)
+                else:
+                    logger.error("HTTP error %d: %s", status_code, response_text)
+                raise
             except httpx.HTTPError as e:
-                logger.error("Failed to submit evaluation for job %s: %s", job_id, e)
-                logger.error("Response: %s", e.response.text if hasattr(e, 'response') else 'N/A')
+                logger.error("Failed to submit evaluation for job %s: %s", job_id, str(e))
                 raise
 
     def load_from_local_files(self, jobs_file: str, traces_file: str) -> tuple[list[dict], list[dict]]:
         """
-        Load jobs and traces from local JSON files (for testing/development).
+        Load jobs and traces from local JSON files with error handling.
 
         Args:
             jobs_file: Path to jobs.json
@@ -238,16 +350,62 @@ class ExploitIQClient:
 
         Returns:
             Tuple of (jobs, traces)
+            
+        Raises:
+            FileNotFoundError: If file does not exist
+            json.JSONDecodeError: If file contains invalid JSON
+            PermissionError: If file cannot be read
         """
         import json
+        from pathlib import Path
 
         logger.info("Loading from local files: jobs=%s, traces=%s", jobs_file, traces_file)
 
-        with open(jobs_file, 'r') as f:
-            jobs = json.load(f)
+        # Load jobs file
+        try:
+            jobs_path = Path(jobs_file)
+            if not jobs_path.exists():
+                logger.error("Jobs file not found: %s", jobs_file)
+                raise FileNotFoundError(f"Jobs file does not exist: {jobs_file}")
+            
+            with open(jobs_file, 'r') as f:
+                jobs = json.load(f)
+            
+            if not isinstance(jobs, list):
+                jobs = [jobs]
+            logger.info("Loaded %d jobs from %s", len(jobs), jobs_file)
+                
+        except json.JSONDecodeError as e:
+            logger.error("Invalid JSON in jobs file: %s", jobs_file)
+            logger.error("JSON error at line %d column %d: %s", e.lineno, e.colno, e.msg)
+            logger.error("Please check the file format")
+            raise
+        except PermissionError:
+            logger.error("Permission denied when reading jobs file: %s", jobs_file)
+            raise
 
-        with open(traces_file, 'r') as f:
-            traces = json.load(f)
+        # Load traces file
+        try:
+            traces_path = Path(traces_file)
+            if not traces_path.exists():
+                logger.error("Traces file not found: %s", traces_file)
+                raise FileNotFoundError(f"Traces file does not exist: {traces_file}")
+            
+            with open(traces_file, 'r') as f:
+                traces = json.load(f)
+            
+            if not isinstance(traces, list):
+                traces = [traces]
+            logger.info("Loaded %d traces from %s", len(traces), traces_file)
+                
+        except json.JSONDecodeError as e:
+            logger.error("Invalid JSON in traces file: %s", traces_file)
+            logger.error("JSON error at line %d column %d: %s", e.lineno, e.colno, e.msg)
+            logger.error("Please check the file format")
+            raise
+        except PermissionError:
+            logger.error("Permission denied when reading traces file: %s", traces_file)
+            raise
 
-        logger.info("Loaded %d jobs and %d traces from local files", len(jobs), len(traces))
+        logger.info("Successfully loaded %d jobs and %d traces", len(jobs), len(traces))
         return jobs, traces
