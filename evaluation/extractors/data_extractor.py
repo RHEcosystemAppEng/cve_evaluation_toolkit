@@ -429,10 +429,15 @@ class JSONExtractor:
         logger.debug("Extracting from JSON file: %s", filepath)
         results = []
         with open(filepath, 'r', encoding='utf-8') as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 if line.strip():
-                    data = json.loads(line)
-                    results.extend(JSONExtractor._parse_output(data))
+                    try:
+                        data = json.loads(line)
+                        results.extend(JSONExtractor._parse_output(data))
+                    except json.JSONDecodeError as e:
+                        logger.warning("Invalid JSON at line %d: %s", line_num, str(e))
+                        logger.debug("Problematic line: %s", line[:100])
+                        continue
         logger.debug("Extracted %d CVE results from JSON", len(results))
         return results
 
@@ -558,7 +563,7 @@ class APIExtractor:
 
             logger.info("Extracting from job %s, CVE %s", job_id, cve_id)
 
-            if not traces:
+            if not traces or len(traces) == 0:
                 logger.warning("No traces provided for job %s", job_id)
                 return None
 
@@ -714,6 +719,11 @@ class APIExtractor:
                                 output_json = json.loads(output_val)
                                 # Extract description from info.intel
                                 intel_list = output_json.get("info", {}).get("intel", [])
+                            except json.JSONDecodeError as e:
+                                logger.warning("Failed to parse CVE output JSON: %s", str(e))
+                                continue
+                            
+                            try:
 
                                 for intel_item in intel_list:
                                     if intel_item.get("vuln_id") == cve_id:
@@ -805,6 +815,12 @@ class APIExtractor:
                 # Step 4: Extract chat_inputs + chat_responses from nat.metadata
                 try:
                     metadata_obj = json.loads(selected_span["metadata_raw"])
+                except json.JSONDecodeError as e:
+                    logger.warning("Failed to parse metadata JSON for question: %s", question[:50])
+                    logger.debug("JSON error: %s", str(e))
+                    continue
+                
+                try:
 
                     # Get inputs content (包含历史步骤)
                     chat_inputs = metadata_obj.get("chat_inputs", [{}])[0].get("content", "")
@@ -932,6 +948,11 @@ class APIExtractor:
 
                                 scores = output_json.get("scores", {})
                                 justifications = output_json.get("justifications", {})
+                            except json.JSONDecodeError as e:
+                                logger.warning("Failed to parse intel score JSON: %s", str(e))
+                                continue
+                            
+                            try:
 
                                 if scores:
                                     # Calculate total score

@@ -348,11 +348,21 @@ class CVEEvaluationOrchestrator:
             True if submission succeeded, False otherwise
         """
         try:
+            # Check if we have metrics to submit
+            metrics = evaluation_results.get("metrics", [])
+            if not metrics or len(metrics) == 0:
+                logger.warning("No metrics to submit for job %s", parsed_result.job_id)
+                return False
+            
             logger.info(" Submitting evaluation results to API...")
 
             # Extract component info (may need adjustment based on actual data structure)
             component = parsed_result.__dict__.get("component", "unknown")
             component_version = parsed_result.__dict__.get("component_version", "unknown")
+            
+            # Warn if component info is incomplete
+            if component == "unknown" or component_version == "unknown":
+                logger.warning("Component info incomplete: %s:%s", component, component_version)
 
             # Submit to API
             response = await self.api_client.submit_evaluation(
@@ -370,6 +380,32 @@ class CVEEvaluationOrchestrator:
 
         except Exception as e:
             logger.error("ERROR: Failed to submit evaluation results: %s", e, exc_info=True)
+            
+            # Save local backup when submission fails
+            backup_file = f"evaluation_backup_{parsed_result.job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            try:
+                import json
+                with open(backup_file, 'w') as f:
+                    backup_data = {
+                        "job_id": parsed_result.job_id,
+                        "cve_id": parsed_result.cve_id,
+                        "trace_id": trace_id,
+                        "component": component,
+                        "component_version": component_version,
+                        "execution_start_timestamp": execution_start_timestamp,
+                        "metrics": evaluation_results["metrics"],
+                        "failed_at": datetime.now().isoformat(),
+                        "error": str(e)
+                    }
+                    json.dump(backup_data, f, indent=2)
+                
+                logger.warning("")
+                logger.warning("Evaluation results saved to local backup: %s", backup_file)
+                logger.warning("You can retry submission later using this backup")
+                logger.warning("")
+            except Exception as save_err:
+                logger.error("Failed to save local backup: %s", save_err)
+            
             return False
 
     async def process_single_job(
@@ -455,6 +491,20 @@ class CVEEvaluationOrchestrator:
             jobs = await self.api_client.fetch_jobs(status="completed", limit=limit)
 
         logger.info("Fetched %d jobs", len(jobs))
+        
+        # Check if we got any jobs
+        if not jobs or len(jobs) == 0:
+            logger.warning("")
+            logger.warning("=" * 80)
+            logger.warning("WARNING: No jobs found in API")
+            logger.warning("This could mean:")
+            logger.warning("  1. No jobs match the status filter (status=completed)")
+            logger.warning("  2. All jobs have already been processed")
+            logger.warning("  3. API returned empty result")
+            logger.warning("=" * 80)
+            logger.warning("")
+            return []
+        
         logger.info("")
 
         all_results = []
@@ -486,6 +536,16 @@ class CVEEvaluationOrchestrator:
         logger.info("Skipped/Failed: %d", failed)
         logger.info("   Success rate: %.1f%%", (successful / len(jobs) * 100) if jobs else 0)
         logger.info("=" * 80)
+        
+        # Warn if all jobs failed
+        if successful == 0 and len(jobs) > 0:
+            logger.error("")
+            logger.error("=" * 80)
+            logger.error("ERROR: All jobs failed!")
+            logger.error("No evaluations were successfully completed")
+            logger.error("Please check the error messages above for details")
+            logger.error("=" * 80)
+            logger.error("")
 
         return all_results
 
@@ -571,6 +631,11 @@ Examples:
     )
 
     args = parser.parse_args()
+    
+    # Validate limit parameter
+    if args.limit is not None and args.limit <= 0:
+        logger.error("ERROR: --limit must be a positive integer, got: %d", args.limit)
+        return 1
 
     # Check environment variables for API mode
     if args.mode == "api":
@@ -588,11 +653,50 @@ Examples:
             logger.error("  export EXPLOIT_IQ_API_BASE='...'")
             logger.error("  export EXPLOIT_IQ_API_TOKEN='...'")
             return 1
+        
+        # Validate BASE_URL format
+        if not base_url.startswith(("http://", "https://")):
+            logger.error("ERROR: BASE_URL must start with http:// or https://")
+            logger.error("Current value: %s", base_url)
+            return 1
+        
+        # Validate URL completeness
+        from urllib.parse import urlparse
+        parsed = urlparse(base_url)
+        if not parsed.netloc:
+            logger.error("ERROR: Invalid BASE_URL format: %s", base_url)
+            logger.error("Example: https://api.example.com")
+            return 1
+        
+        # Validate token format
+        token = token.strip()
+        if len(token) < 10:
+            logger.error("ERROR: API token seems too short (%d characters)", len(token))
+            logger.error("Please check if you copied the complete token")
+            return 1
+        
+        if ' ' in token:
+            logger.warning("WARNING: API token contains spaces")
+            logger.warning("This is unusual and may cause authentication failures")
 
         logger.info("API Configuration:")
         logger.info("  Base URL: %s", base_url)
         logger.info("  Token: %s***%s", token[:8] if len(token) > 12 else "***",
                    token[-4:] if len(token) > 4 else "")
+    
+    # Check NGC_API_KEY early (before initializing judge)
+    ngc_key = (os.getenv("NGC_API_KEY") or os.getenv("FIREWORKS_API_KEY") or "").strip()
+    if not ngc_key:
+        logger.error("")
+        logger.error("ERROR: NGC_API_KEY environment variable is not set")
+        logger.error("This is required for LLM-based evaluation")
+        logger.error("")
+        logger.error("Please set it before running:")
+        logger.error("  export NGC_API_KEY='your-nvidia-api-key'")
+        logger.error("")
+        logger.error("You can get an API key from: https://build.nvidia.com/")
+        logger.error("")
+        return 1
 
     # Initialize API client
     logger.info("")
@@ -602,9 +706,16 @@ Examples:
 
     # Initialize judge model
     logger.info("Initializing LLM judge model...")
-    judge_config = JudgeConfig()
-    judge_model = FireworksJudge(config=judge_config)
-    logger.info("  Judge model: %s", judge_config.model_name)
+    try:
+        judge_config = JudgeConfig()
+        judge_model = FireworksJudge(config=judge_config)
+        logger.info("  Judge model: %s", judge_config.model_name)
+    except (ValueError, Exception) as e:
+        logger.error("")
+        logger.error("ERROR: Failed to initialize LLM judge")
+        logger.error("Reason: %s", str(e))
+        logger.error("")
+        return 1
 
     # Initialize orchestrator
     logger.info("")
@@ -629,6 +740,31 @@ Examples:
             logger.info("=" * 80)
             logger.info("  Jobs file: %s", args.jobs_file)
             logger.info("  Traces file: %s", args.traces_file)
+            
+            # Validate file existence
+            from pathlib import Path
+            jobs_path = Path(args.jobs_file)
+            traces_path = Path(args.traces_file)
+            
+            if not jobs_path.exists():
+                logger.error("")
+                logger.error("ERROR: Jobs file not found: %s", args.jobs_file)
+                logger.error("Please provide a valid path to the jobs JSON file")
+                logger.error("")
+                return 1
+            
+            if not traces_path.exists():
+                logger.error("")
+                logger.error("ERROR: Traces file not found: %s", args.traces_file)
+                logger.error("Please provide a valid path to the traces JSON file")
+                logger.error("")
+                return 1
+            
+            # Warn if trying to submit in local mode
+            if args.submit:
+                logger.warning("WARNING: --submit flag ignored in local mode")
+                logger.warning("Results will only be saved locally")
+                args.submit = False
 
             jobs, traces = api_client.load_from_local_files(args.jobs_file, args.traces_file)
 
@@ -683,11 +819,34 @@ Examples:
             logger.info("   Skipped: %d", skipped)
             logger.info("=" * 80)
 
+        # Validate output directory exists
+        output_path = Path(args.output)
+        output_dir = output_path.parent
+        
+        if output_dir != Path('.') and not output_dir.exists():
+            try:
+                logger.info("Creating output directory: %s", output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except PermissionError:
+                logger.error("")
+                logger.error("ERROR: Permission denied creating output directory: %s", output_dir)
+                logger.error("")
+                return 1
+        
+        # Check if we have any results
+        if not results or len(results) == 0:
+            logger.warning("")
+            logger.warning("=" * 80)
+            logger.warning("WARNING: No successful evaluations to save")
+            logger.warning("All jobs either failed or were skipped")
+            logger.warning("Please check the error messages above")
+            logger.warning("=" * 80)
+            logger.warning("")
+            # Still save empty file for consistency
+        
         # Save results to file
         logger.info("")
         logger.info("Saving results to %s...", args.output)
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Convert to API format if requested
         if args.output_format == "api":
@@ -727,8 +886,30 @@ Examples:
             results_to_save = results
             logger.info("  Using local format (nested structure)")
 
-        with open(output_path, 'w') as f:
-            json.dump(results_to_save, f, indent=2)
+        try:
+            with open(output_path, 'w') as f:
+                json.dump(results_to_save, f, indent=2)
+        except PermissionError:
+            logger.error("")
+            logger.error("ERROR: Permission denied when writing to: %s", output_path)
+            logger.error("Please check file permissions")
+            logger.error("")
+            return 1
+        except OSError as e:
+            logger.error("")
+            logger.error("ERROR: Failed to write output file: %s", str(e))
+            logger.error("This may be caused by:")
+            logger.error("  1. Disk full")
+            logger.error("  2. Invalid file path")
+            logger.error("  3. File system error")
+            logger.error("")
+            return 1
+        except TypeError as e:
+            logger.error("")
+            logger.error("ERROR: Failed to serialize results to JSON: %s", str(e))
+            logger.error("Some data may not be JSON-serializable")
+            logger.error("")
+            return 1
 
         logger.info("")
         logger.info("=" * 80)

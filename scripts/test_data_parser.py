@@ -219,10 +219,13 @@ def main():
         }
     }
 
-    with open(output_file, 'w') as f:
-        json.dump(parsed_dict, f, indent=2, ensure_ascii=False)
-
-    print(f"Saved to: {output_file}")
+    try:
+        with open(output_file, 'w') as f:
+            json.dump(parsed_dict, f, indent=2, ensure_ascii=False)
+        print(f"Saved to: {output_file}")
+    except (PermissionError, OSError, TypeError) as e:
+        print(f"ERROR: Failed to save output file: {e}")
+        return 1
     print()
     print("Inspect the exact input data that will be used for evaluation:")
     print(f"   jq . {output_file}")
