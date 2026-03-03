@@ -505,6 +505,13 @@ class CVEEvaluationOrchestrator:
             logger.warning("")
             return []
         
+        # Apply client-side limit if API didn't respect it
+        if limit and len(jobs) > limit:
+            logger.warning("API returned %d jobs but --limit %d was requested", len(jobs), limit)
+            logger.warning("Applying client-side limit to process only the first %d jobs", limit)
+            jobs = jobs[:limit]
+            logger.info("Will process %d jobs", len(jobs))
+        
         logger.info("")
 
         all_results = []
@@ -680,9 +687,9 @@ Examples:
             logger.warning("This is unusual and may cause authentication failures")
 
         logger.info("API Configuration:")
-        logger.info("  Base URL: %s", base_url)
-        logger.info("  Token: %s***%s", token[:8] if len(token) > 12 else "***",
-                   token[-4:] if len(token) > 4 else "")
+        logger.info("  Base URL: [REDACTED]")
+        logger.info("  Token: [REDACTED]")
+        logger.info("  Note: Credentials loaded from environment variables")
     
     # Check NGC_API_KEY early (before initializing judge)
     ngc_key = (os.getenv("NGC_API_KEY") or os.getenv("FIREWORKS_API_KEY") or "").strip()
@@ -742,7 +749,6 @@ Examples:
             logger.info("  Traces file: %s", args.traces_file)
             
             # Validate file existence
-            from pathlib import Path
             jobs_path = Path(args.jobs_file)
             traces_path = Path(args.traces_file)
             
