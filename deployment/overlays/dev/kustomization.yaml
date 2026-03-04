@@ -9,7 +9,7 @@ namePrefix: dev-
 # Override image tag for dev
 images:
 - name: cve-evaluation
-  newName: quay.io/your-org/cve-evaluation
+  newName: quay.io/ecosystem-appeng/cve-evaluation
   newTag: dev
 
 # Override replicas for dev
