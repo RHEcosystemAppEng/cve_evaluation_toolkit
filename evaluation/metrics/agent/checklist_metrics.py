@@ -67,7 +67,7 @@ def create_checklist_prompt_alignment_metric(judge_model: DeepEvalBaseLLM,
         model=judge_model,
         threshold=threshold,
         include_reason=True,
-        verbose_mode=True)
+        verbose_mode=False)
 
 
 def create_checklist_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
@@ -114,7 +114,7 @@ def create_checklist_quality_metric(judge_model: DeepEvalBaseLLM, threshold: flo
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
                  threshold=threshold,
-                 verbose_mode=True)
+                 verbose_mode=False)
 
 
 # ============================================================================

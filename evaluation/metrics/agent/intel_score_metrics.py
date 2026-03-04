@@ -145,7 +145,7 @@ def create_intel_score_fidelity_metric(judge_model: DeepEvalBaseLLM, threshold: 
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
                  threshold=threshold,
-                 verbose_mode=True)
+                 verbose_mode=False)
 
 
 # ============================================================================

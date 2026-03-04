@@ -105,35 +105,23 @@ class ExploitIQClient:
                 logger.info("Fetched %d jobs", len(jobs) if isinstance(jobs, list) else 1)
                 return jobs if isinstance(jobs, list) else [jobs]
             except httpx.TimeoutException:
-                logger.error("Request timed out after %d seconds when fetching jobs", self.config.timeout)
-                logger.error("The API server may be overloaded or unreachable")
-                logger.error("Try increasing timeout or check server status")
+                logger.error("Request timed out after %ds - server may be overloaded or unreachable", self.config.timeout)
                 raise
             except httpx.ConnectError as e:
-                logger.error("Failed to connect to API at: %s", url)
-                logger.error("Please check:")
-                logger.error("  1. Network connection is working")
-                logger.error("  2. BASE_URL is correct: %s", self.base_url)
-                logger.error("  3. No firewall blocking the connection")
-                logger.error("Error: %s", str(e))
+                logger.error("Connection failed - check network, BASE_URL, and firewall: %s", str(e))
                 raise
             except httpx.HTTPStatusError as e:
                 status_code = e.response.status_code
                 if status_code == 401:
-                    logger.error("Authentication failed (401 Unauthorized)")
-                    logger.error("Please check your API_TOKEN environment variable")
+                    logger.error("Authentication failed (401) - check API_TOKEN")
                 elif status_code == 403:
-                    logger.error("Access forbidden (403 Forbidden)")
-                    logger.error("Your API token may not have permission to access this resource")
+                    logger.error("Access forbidden (403) - insufficient permissions")
                 elif status_code == 404:
-                    logger.error("API endpoint not found (404)")
-                    logger.error("Please verify the BASE_URL is correct: %s", self.base_url)
+                    logger.error("API endpoint not found (404) - verify BASE_URL")
                 elif status_code == 429:
-                    logger.error("Rate limit exceeded (429 Too Many Requests)")
-                    logger.error("Please wait a few minutes before trying again")
+                    logger.error("Rate limit exceeded (429) - wait before retrying")
                 elif status_code >= 500:
-                    logger.error("Server error (%d)", status_code)
-                    logger.error("The API service may be temporarily unavailable")
+                    logger.error("Server error (%d) - service temporarily unavailable", status_code)
                 else:
                     logger.error("HTTP error %d: %s", status_code, e.response.text)
                 raise
@@ -177,22 +165,18 @@ class ExploitIQClient:
                     logger.error("No job found with job_id=%s", job_id)
                     raise ValueError(f"Job not found: {job_id}")
             except httpx.TimeoutException:
-                logger.error("Request timed out when fetching job %s", job_id)
-                logger.error("The API server may be overloaded or unreachable")
+                logger.error("Request timed out fetching job %s - server may be overloaded", job_id)
                 raise
             except httpx.HTTPStatusError as e:
                 status_code = e.response.status_code
                 if status_code == 401:
-                    logger.error("Authentication failed (401)")
-                    logger.error("Please check your API_TOKEN")
+                    logger.error("Authentication failed (401) - check API_TOKEN")
                 elif status_code == 404:
                     logger.error("Job not found (404): %s", job_id)
-                    logger.error("The job may not exist or has been deleted")
                 elif status_code == 429:
-                    logger.error("Rate limit exceeded (429)")
-                    logger.error("Please wait before trying again")
+                    logger.error("Rate limit exceeded (429) - wait before retrying")
                 elif status_code >= 500:
-                    logger.error("Server error (%d)", status_code)
+                    logger.error("Server error (%d) - service unavailable", status_code)
                 else:
                     logger.error("HTTP error %d: %s", status_code, e.response.text)
                 raise
@@ -229,16 +213,16 @@ class ExploitIQClient:
                 logger.info("Fetched %d traces for job %s", len(traces) if isinstance(traces, list) else 0, job_id)
                 return traces if isinstance(traces, list) else []
             except httpx.TimeoutException:
-                logger.error("Request timed out when fetching traces for job %s", job_id)
+                logger.error("Request timed out fetching traces for job %s", job_id)
                 raise
             except httpx.HTTPStatusError as e:
                 status_code = e.response.status_code
                 if status_code == 401:
-                    logger.error("Authentication failed (401)")
+                    logger.error("Authentication failed (401) - check API_TOKEN")
                 elif status_code == 404:
-                    logger.error("Traces not found for job %s (404)", job_id)
+                    logger.error("Traces not found (404) for job %s", job_id)
                 elif status_code >= 500:
-                    logger.error("Server error (%d)", status_code)
+                    logger.error("Server error (%d) - service unavailable", status_code)
                 else:
                     logger.error("HTTP error %d: %s", status_code, e.response.text)
                 raise
@@ -310,31 +294,24 @@ class ExploitIQClient:
                 logger.info("Successfully submitted evaluation for job %s", job_id)
                 return result
             except httpx.TimeoutException:
-                logger.error("Request timed out when submitting evaluation for job %s", job_id)
-                logger.error("The evaluation data may be too large or server is slow")
+                logger.error("Request timed out submitting evaluation for job %s - data may be too large", job_id)
                 raise
             except httpx.HTTPStatusError as e:
                 status_code = e.response.status_code
                 response_text = e.response.text if hasattr(e, 'response') else 'N/A'
                 
                 if status_code == 400:
-                    logger.error("Bad request (400) when submitting evaluation")
-                    logger.error("The payload format may be incorrect")
-                    logger.error("Response: %s", response_text)
+                    logger.error("Bad request (400) - payload format may be incorrect: %s", response_text[:200])
                 elif status_code == 401:
-                    logger.error("Authentication failed (401)")
-                    logger.error("Please check your API_TOKEN")
+                    logger.error("Authentication failed (401) - check API_TOKEN")
                 elif status_code == 413:
-                    logger.error("Payload too large (413)")
-                    logger.error("Try reducing the number of metrics or data size")
+                    logger.error("Payload too large (413) - reduce metrics or data size")
                 elif status_code == 429:
-                    logger.error("Rate limit exceeded (429)")
-                    logger.error("Please wait before submitting more evaluations")
+                    logger.error("Rate limit exceeded (429) - wait before retrying")
                 elif status_code >= 500:
-                    logger.error("Server error (%d)", status_code)
-                    logger.error("Response: %s", response_text)
+                    logger.error("Server error (%d) - service unavailable: %s", status_code, response_text[:200])
                 else:
-                    logger.error("HTTP error %d: %s", status_code, response_text)
+                    logger.error("HTTP error %d: %s", status_code, response_text[:200])
                 raise
             except httpx.HTTPError as e:
                 logger.error("Failed to submit evaluation for job %s: %s", job_id, str(e))

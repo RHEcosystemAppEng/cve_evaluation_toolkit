@@ -494,15 +494,7 @@ class CVEEvaluationOrchestrator:
         
         # Check if we got any jobs
         if not jobs or len(jobs) == 0:
-            logger.warning("")
-            logger.warning("=" * 80)
-            logger.warning("WARNING: No jobs found in API")
-            logger.warning("This could mean:")
-            logger.warning("  1. No jobs match the status filter (status=completed)")
-            logger.warning("  2. All jobs have already been processed")
-            logger.warning("  3. API returned empty result")
-            logger.warning("=" * 80)
-            logger.warning("")
+            logger.warning("No jobs found in API (status=completed) - all may be processed already")
             return []
         
         # Apply client-side limit if API didn't respect it
@@ -546,13 +538,7 @@ class CVEEvaluationOrchestrator:
         
         # Warn if all jobs failed
         if successful == 0 and len(jobs) > 0:
-            logger.error("")
-            logger.error("=" * 80)
-            logger.error("ERROR: All jobs failed!")
-            logger.error("No evaluations were successfully completed")
-            logger.error("Please check the error messages above for details")
-            logger.error("=" * 80)
-            logger.error("")
+            logger.error("All %d jobs failed - check error messages above", len(jobs))
 
         return all_results
 
@@ -650,42 +636,35 @@ Examples:
         token = os.getenv("TOKEN") or os.getenv("EXPLOIT_IQ_API_TOKEN")
 
         if not base_url or not token:
-            logger.error("ERROR: Missing API credentials!")
-            logger.error("")
-            logger.error("Please set environment variables:")
-            logger.error("  export BASE='https://your-api-endpoint.com'")
-            logger.error("  export TOKEN='your-token-here'")
-            logger.error("")
-            logger.error("Or alternatively:")
-            logger.error("  export EXPLOIT_IQ_API_BASE='...'")
-            logger.error("  export EXPLOIT_IQ_API_TOKEN='...'")
+            logger.error("Missing API credentials - set BASE and TOKEN environment variables")
             return 1
         
         # Validate BASE_URL format
         if not base_url.startswith(("http://", "https://")):
-            logger.error("ERROR: BASE_URL must start with http:// or https://")
-            logger.error("Current value: %s", base_url)
+            logger.error("BASE_URL must start with http:// or https://, got: %s", base_url)
             return 1
         
         # Validate URL completeness
         from urllib.parse import urlparse
         parsed = urlparse(base_url)
         if not parsed.netloc:
-            logger.error("ERROR: Invalid BASE_URL format: %s", base_url)
-            logger.error("Example: https://api.example.com")
+            logger.error("Invalid BASE_URL format: %s (example: https://api.example.com)", base_url)
             return 1
         
         # Validate token format
         token = token.strip()
         if len(token) < 10:
-            logger.error("ERROR: API token seems too short (%d characters)", len(token))
-            logger.error("Please check if you copied the complete token")
+            logger.error("API token too short (%d chars) - check if complete token was copied", len(token))
             return 1
         
         if ' ' in token:
-            logger.warning("WARNING: API token contains spaces")
-            logger.warning("This is unusual and may cause authentication failures")
+            logger.warning("API token contains spaces - may cause authentication failures")
 
+        # logger.info("API Configuration:")
+        # logger.info("  Base URL: %s", base_url)
+        # logger.info("  Token: %s***%s", token[:8] if len(token) > 12 else "***",
+        #            token[-4:] if len(token) > 4 else "")
+        
         logger.info("API Configuration:")
         logger.info("  Base URL: [REDACTED]")
         logger.info("  Token: [REDACTED]")
@@ -694,15 +673,7 @@ Examples:
     # Check NGC_API_KEY early (before initializing judge)
     ngc_key = (os.getenv("NGC_API_KEY") or os.getenv("FIREWORKS_API_KEY") or "").strip()
     if not ngc_key:
-        logger.error("")
-        logger.error("ERROR: NGC_API_KEY environment variable is not set")
-        logger.error("This is required for LLM-based evaluation")
-        logger.error("")
-        logger.error("Please set it before running:")
-        logger.error("  export NGC_API_KEY='your-nvidia-api-key'")
-        logger.error("")
-        logger.error("You can get an API key from: https://build.nvidia.com/")
-        logger.error("")
+        logger.error("NGC_API_KEY required for LLM evaluation - set environment variable")
         return 1
 
     # Initialize API client
@@ -753,23 +724,16 @@ Examples:
             traces_path = Path(args.traces_file)
             
             if not jobs_path.exists():
-                logger.error("")
-                logger.error("ERROR: Jobs file not found: %s", args.jobs_file)
-                logger.error("Please provide a valid path to the jobs JSON file")
-                logger.error("")
+                logger.error("Jobs file not found: %s", args.jobs_file)
                 return 1
             
             if not traces_path.exists():
-                logger.error("")
-                logger.error("ERROR: Traces file not found: %s", args.traces_file)
-                logger.error("Please provide a valid path to the traces JSON file")
-                logger.error("")
+                logger.error("Traces file not found: %s", args.traces_file)
                 return 1
             
             # Warn if trying to submit in local mode
             if args.submit:
-                logger.warning("WARNING: --submit flag ignored in local mode")
-                logger.warning("Results will only be saved locally")
+                logger.warning("--submit flag ignored in local mode - results saved locally only")
                 args.submit = False
 
             jobs, traces = api_client.load_from_local_files(args.jobs_file, args.traces_file)
@@ -834,20 +798,12 @@ Examples:
                 logger.info("Creating output directory: %s", output_dir)
                 output_dir.mkdir(parents=True, exist_ok=True)
             except PermissionError:
-                logger.error("")
-                logger.error("ERROR: Permission denied creating output directory: %s", output_dir)
-                logger.error("")
+                logger.error("Permission denied creating output directory: %s", output_dir)
                 return 1
         
         # Check if we have any results
         if not results or len(results) == 0:
-            logger.warning("")
-            logger.warning("=" * 80)
-            logger.warning("WARNING: No successful evaluations to save")
-            logger.warning("All jobs either failed or were skipped")
-            logger.warning("Please check the error messages above")
-            logger.warning("=" * 80)
-            logger.warning("")
+            logger.warning("No successful evaluations - all jobs failed or were skipped")
             # Still save empty file for consistency
         
         # Save results to file
@@ -896,25 +852,13 @@ Examples:
             with open(output_path, 'w') as f:
                 json.dump(results_to_save, f, indent=2)
         except PermissionError:
-            logger.error("")
-            logger.error("ERROR: Permission denied when writing to: %s", output_path)
-            logger.error("Please check file permissions")
-            logger.error("")
+            logger.error("Permission denied writing to: %s", output_path)
             return 1
         except OSError as e:
-            logger.error("")
-            logger.error("ERROR: Failed to write output file: %s", str(e))
-            logger.error("This may be caused by:")
-            logger.error("  1. Disk full")
-            logger.error("  2. Invalid file path")
-            logger.error("  3. File system error")
-            logger.error("")
+            logger.error("Failed to write output file (check disk space/path): %s", str(e))
             return 1
         except TypeError as e:
-            logger.error("")
-            logger.error("ERROR: Failed to serialize results to JSON: %s", str(e))
-            logger.error("Some data may not be JSON-serializable")
-            logger.error("")
+            logger.error("Failed to serialize results to JSON: %s", str(e))
             return 1
 
         logger.info("")
