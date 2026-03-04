@@ -86,11 +86,7 @@ class FireworksJudge(DeepEvalBaseLLM):
         api_key = self.config.api_key or os.environ.get("NGC_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
 
         if not api_key:
-            logger.error("ERROR: NGC API key is required but not provided")
-            logger.error("Please set NGC_API_KEY environment variable:")
-            logger.error("  export NGC_API_KEY='your-nvidia-api-key'")
-            logger.error("")
-            logger.error("You can get an API key from: https://build.nvidia.com/")
+            logger.error("NGC API key required - set NGC_API_KEY environment variable")
             raise ValueError("NGC_API_KEY environment variable must be set")
 
         try:
@@ -122,10 +118,6 @@ class FireworksJudge(DeepEvalBaseLLM):
         """
         logger.debug(f"Generating response (prompt length: {len(prompt)})")
         
-        # Warn if prompt is very long (approximate token limit check)
-        if len(prompt) > 100000:
-            logger.warning("Prompt is very long (%d chars), may exceed token limit", len(prompt))
-        
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -146,35 +138,23 @@ class FireworksJudge(DeepEvalBaseLLM):
             return content or ""
             
         except AuthenticationError as e:
-            logger.error("Authentication failed with NGC API")
-            logger.error("Please check that NGC_API_KEY environment variable is set correctly")
-            logger.error("Error details: %s", str(e))
+            logger.error("NGC API authentication failed - check NGC_API_KEY: %s", str(e))
             raise
         except RateLimitError as e:
-            logger.error("NGC API rate limit exceeded")
-            logger.error("Please wait a few minutes and try again, or reduce batch size with --limit")
-            logger.error("Error details: %s", str(e))
+            logger.error("NGC API rate limit exceeded - wait or reduce --limit: %s", str(e))
             raise
         except APIConnectionError as e:
-            logger.error("Failed to connect to NGC API at: %s", self.config.base_url)
-            logger.error("Please check:")
-            logger.error("  1. Network connection is working")
-            logger.error("  2. API endpoint URL is correct: %s", self.config.base_url)
-            logger.error("  3. No firewall blocking the connection")
-            logger.error("Error details: %s", str(e))
+            logger.error("Cannot connect to NGC API - check network/endpoint: %s", str(e))
             raise
         except BadRequestError as e:
             error_msg = str(e)
-            if "model_not_found" in error_msg or "model" in error_msg.lower():
-                logger.error("Model not found: %s", self.config.model_name)
-                logger.error("Please verify the model name is correct")
-                logger.error("Common models: meta/llama-3.1-70b-instruct, mistralai/mistral-small-3.1-24b-instruct-2503")
+            if "model" in error_msg.lower():
+                logger.error("Model error with %s - verify model name is correct", self.config.model_name)
             else:
                 logger.error("Bad request to NGC API: %s", error_msg)
             raise
         except APIError as e:
-            logger.error("NGC API error occurred: %s", str(e))
-            logger.error("This may be a temporary service issue, please try again later")
+            logger.error("NGC API error - may be temporary: %s", str(e))
             raise
         except Exception as e:
             logger.error("Unexpected error during LLM generation: %s", str(e), exc_info=True)
@@ -218,8 +198,7 @@ class DirectJudge:
         api_key = self.config.api_key or os.environ.get("NGC_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
 
         if not api_key:
-            logger.error("ERROR: NGC API key is required but not provided")
-            logger.error("Please set NGC_API_KEY environment variable")
+            logger.error("NGC API key required - set NGC_API_KEY environment variable")
             raise ValueError("NGC_API_KEY environment variable must be set")
 
         try:
@@ -253,10 +232,6 @@ class DirectJudge:
 
         logger.debug(f"Executing judgment (prompt length: {len(prompt)})")
         
-        # Warn if prompt is very long
-        if len(prompt) > 100000:
-            logger.warning("Prompt is very long (%d chars), may exceed token limit", len(prompt))
-        
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -284,19 +259,7 @@ class DirectJudge:
                 }
             }
             
-        except AuthenticationError as e:
-            logger.error("Authentication failed with NGC API")
-            logger.error("Please check that NGC_API_KEY environment variable is set correctly")
-            raise
-        except RateLimitError as e:
-            logger.error("NGC API rate limit exceeded")
-            logger.error("Please wait and try again, or reduce batch size")
-            raise
-        except APIConnectionError as e:
-            logger.error("Failed to connect to NGC API at: %s", self.config.base_url)
-            logger.error("Please check network connection and API endpoint")
-            raise
-        except APIError as e:
+        except (AuthenticationError, RateLimitError, APIConnectionError, APIError) as e:
             logger.error("NGC API error: %s", str(e))
             raise
         except Exception as e:

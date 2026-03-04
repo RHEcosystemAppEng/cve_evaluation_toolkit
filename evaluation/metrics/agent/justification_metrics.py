@@ -177,7 +177,7 @@ def create_justification_metric(judge_model: DeepEvalBaseLLM, threshold: float =
         evaluation_params=[LLMTestCaseParams.CONTEXT, LLMTestCaseParams.ACTUAL_OUTPUT],
         model=judge_model,
         threshold=threshold,
-        verbose_mode=True
+        verbose_mode=False
     )
 
 

@@ -160,7 +160,7 @@ def create_summary_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) 
                  evaluation_params=[LLMTestCaseParams.CONTEXT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
                  threshold=threshold,
-                 verbose_mode=True)
+                 verbose_mode=False)
 
 
 # ============================================================================
