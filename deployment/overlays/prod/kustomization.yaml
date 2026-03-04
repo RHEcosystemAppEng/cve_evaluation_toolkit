@@ -11,7 +11,7 @@ namePrefix: prod-
 # Production image tag (use specific version, not latest)
 images:
   - name: cve-evaluation
-    newName: quay.io/your-org/cve-evaluation
+    newName: quay.io/ecosystem-appeng/cve-evaluation
     newTag: v1.0.0
 
 # Production replicas (can scale up)

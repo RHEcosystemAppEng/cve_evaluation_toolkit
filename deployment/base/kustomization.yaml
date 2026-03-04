@@ -11,7 +11,7 @@ resources:
 
 images:
 - name: cve-evaluation
-  newName: quay.io/your-org/cve-evaluation
+  newName: quay.io/ecosystem-appeng/cve-evaluation
   newTag: latest
 labels:
 - includeSelectors: true
