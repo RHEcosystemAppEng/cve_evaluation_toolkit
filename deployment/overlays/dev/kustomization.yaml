@@ -22,7 +22,7 @@ configMapGenerator:
 - behavior: replace
   literals:
   - EXPLOIT_IQ_API_BASE=https://exploit-iq-dev.apps.dev-cluster.com
-  - JUDGE_MODEL=mistralai/mistral-small-3.1-24b-instruct-2503
+  - JUDGE_MODEL=meta/llama-3.1-70b-instruct
   - JUDGE_BASE_URL=https://integrate.api.nvidia.com/v1
   - LOG_LEVEL=DEBUG
   - EVALUATION_TIMEOUT=600
