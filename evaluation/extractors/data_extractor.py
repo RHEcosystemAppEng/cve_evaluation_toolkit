@@ -655,7 +655,8 @@ class APIExtractor:
 
             # Investigation Steps (from cve_agent_executor LLM traces)
             # Use timestamp-based method with checklist questions
-            checklist_step_details = APIExtractor._extract_agent_investigation_from_traces(traces, checklist_questions)
+            # checklist_step_details = APIExtractor._extract_agent_investigation_from_traces(traces, checklist_questions)
+            checklist_step_details = APIExtractor._extract_agent_investigation_from_traces(traces, checklist_raw)
 
             logger.info("Extracted from traces: description=%d chars, intel_score=%s, investigation_steps=%d",
                         len(description),
@@ -753,128 +754,193 @@ class APIExtractor:
 
     @staticmethod
     def _extract_agent_investigation_from_traces(traces: list[dict[str, Any]],
-                                                 checklist_questions: list[str]) -> list[ChecklistStepDetail]:
+                                             checklist_items: list[dict]) -> list[ChecklistStepDetail]:
         """
-        Extract investigation steps using timestamp-based selection.
+        Extract investigation steps from LangGraph trace format.
 
-        For each checklist question:
-        1. Filter spans: nat.function.name == "cve_agent_executor" AND nat.event_type == "LLM_START"
-        2. Find spans where input.value contains the question
-        3. Select the span with maximum nat.event_timestamp (most recent attempt)
-        4. Extract chat_inputs + chat_responses from nat.metadata
+        New format uses 'thought node' and 'observation node' instead of 'cve_agent_executor'.
+        We group spans by extracting the question from thought node inputs, then match
+        to checklist questions.
 
         Args:
             traces: List of trace spans
             checklist_questions: List of question strings from job checklist
 
         Returns:
-            List of ChecklistStepDetail objects
+            List of ChecklistStepDetail objects with investigation details
         """
-
+        NODE_FUNCTION_NAMES = {"thought node", "observation node", "pre_process node"}
+        
         investigation_steps = []
-
-        for question in checklist_questions:
+        
+        # Helper: Extract question from thought node's LLM input
+        def extract_question_from_thought_input(input_value: str) -> str:
             try:
-                # Step 1 & 2: Filter spans with cve_agent_executor + LLM_START containing this question
-                matching_spans = []
+                messages = json.loads(input_value)
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("type") == "human":
+                        content = msg.get("content", "")
+                        # Extract from <INVESTIGATION_QUESTION> tags if present
+                        if "<INVESTIGATION_QUESTION>" in content:
+                            start = content.find("<INVESTIGATION_QUESTION>") + len("<INVESTIGATION_QUESTION>")
+                            end = content.find("</INVESTIGATION_QUESTION>")
+                            if end > start:
+                                return content[start:end].strip()
+                        return content
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return ""
+        
+        # Helper: Normalize question for matching
+        def normalize_question(q: str) -> str:
+            return " ".join(q.lower().split())
+        
+        # Step 1: Collect all agent-related spans
+        agent_spans = []
+        for trace in traces:
+            attrs = trace.get("spanPayload", {}).get("span_payload", {}).get("attributes", {})
+            metadata = trace.get("spanPayload", {}).get("span_payload", {}).get("metadata", {})
+            
+            func_name = attrs.get("nat.function.name", {}).get("stringValue", "")
+            event_type = attrs.get("nat.event_type", {}).get("stringValue", "")
+            
+            if func_name in NODE_FUNCTION_NAMES:
+                span_data = {
+                    "function_name": func_name,
+                    "input_value": attrs.get("input.value", {}).get("stringValue", ""),
+                    "output_value": attrs.get("output.value", {}).get("stringValue", ""),
+                    "start_time": attrs.get("nat.event_timestamp", {}).get("stringValue", ""),
+                    "metadata": attrs.get("nat.metadata", {}).get("stringValue", "")
+                }
+                agent_spans.append(span_data)
+        
+        # Sort by timestamp
+        agent_spans.sort(key=lambda s: s.get("start_time", ""))
+        
+        logger.debug("Collected %d agent spans (thought/observation nodes)", len(agent_spans))
+        
+        # Step 2: Group spans by question 
+        question_to_spans = {}
+        current_question = None
 
-                for trace in traces:
-                    attrs = trace.get("spanPayload", {}).get("span_payload", {}).get("attributes", {})
-
-                    # Check function name and event type
-                    func_name = attrs.get("nat.function.name", {}).get("stringValue", "")
-                    event_type = attrs.get("nat.event_type", {}).get("stringValue", "")
-
-                    if func_name != "cve_agent_executor" or event_type != "LLM_START":
-                        continue
-
-                    # Check if input.value contains this question
-                    input_value = attrs.get("input.value", {}).get("stringValue", "")
-
-                    if question not in input_value:
-                        continue
-
-                    # Get timestamp and metadata
-                    timestamp = attrs.get("nat.event_timestamp", {}).get("doubleValue", 0.0)
-                    metadata_raw = attrs.get("nat.metadata", {}).get("stringValue", "")
-
-                    matching_spans.append({"timestamp": timestamp, "metadata_raw": metadata_raw})
-
-                if not matching_spans:
-                    logger.warning("No matching spans found for question: %s", question[:50])
-                    continue
-
-                # Step 3: Select span with maximum timestamp (most recent attempt)
-                matching_spans.sort(key=lambda x: x["timestamp"], reverse=True)
-                selected_span = matching_spans[0]
-
-                logger.debug("Found %d spans for question, selected latest (timestamp=%.2f)",
-                             len(matching_spans),
-                             selected_span["timestamp"])
-
-                # Step 4: Extract chat_inputs + chat_responses from nat.metadata
-                try:
-                    metadata_obj = json.loads(selected_span["metadata_raw"])
-                except json.JSONDecodeError as e:
-                    logger.warning("Failed to parse metadata JSON for question: %s", question[:50])
-                    logger.debug("JSON error: %s", str(e))
-                    continue
-                
-                try:
-
-                    # Get inputs content (包含历史步骤)
-                    chat_inputs = metadata_obj.get("chat_inputs", [{}])[0].get("content", "")
-
-                    # Get responses text (包含最终答案)
-                    chat_responses_list = metadata_obj.get("chat_responses", [])
-                    chat_responses = ""
-                    if chat_responses_list:
-                        chat_responses = chat_responses_list[0].get("text", "")
-                        if not chat_responses:
-                            message = chat_responses_list[0].get("message", {})
-                            chat_responses = message.get("content", "")
-
-                    # Combine full context
-                    full_action_log = chat_inputs
-                    if chat_responses:
-                        full_action_log += "\n" + chat_responses
-
-                    # Parse tool calls from full action log
-                    tool_calls = APIExtractor._parse_tool_calls_from_action_log(full_action_log)
-
-                    # Extract final response (text after "Final Answer:")
-                    final_response = ""
-                    if "Final Answer:" in chat_responses:
-                        final_response = chat_responses.split("Final Answer:")[-1].strip()
+        # Build a list of questions from checklist_items for matching
+        checklist_questions = [item.get("input", "") for item in checklist_items if item.get("input")]
+        
+        for span in agent_spans:
+            # If it's a thought node, extract the question
+            if span["function_name"] == "thought node":
+                extracted_q = extract_question_from_thought_input(span.get("input_value", ""))
+                if extracted_q:
+                    norm_extracted = normalize_question(extracted_q)
+                    
+                    # Try to match to one of the checklist questions
+                    matched = None
+                    for checklist_q in checklist_questions:
+                        norm_checklist = normalize_question(checklist_q)
+                        # Use substring matching (first 60 chars)
+                        if norm_extracted[:60] in norm_checklist or norm_checklist[:60] in norm_extracted:
+                            matched = checklist_q
+                            break
+                    
+                    if matched:
+                        current_question = matched
+                        question_to_spans.setdefault(matched, []).append(span)
                     else:
-                        # If no "Final Answer:" tag, use the full response
-                        final_response = chat_responses
+                        # Question not in checklist, create a new group
+                        current_question = extracted_q
+                        question_to_spans.setdefault(extracted_q, []).append(span)
+            else:
+                # observation/pre_process nodes follow the most recent thought
+                if current_question:
+                    question_to_spans.setdefault(current_question, []).append(span)
+        
+        logger.info("Grouped spans into %d question groups", len(question_to_spans))
+        
+        # Step 3: Build investigation steps for each checklist question
+        for i, checklist_item in enumerate(checklist_items, 1):
+            # spans = question_to_spans.get(checklist_q, [])
+            question = checklist_item.get("input", "")
+            response = checklist_item.get("response", "")
 
-                    # Create ChecklistStepDetail
-                    investigation_steps.append(
-                        ChecklistStepDetail(step_number=len(investigation_steps) + 1,
-                                            title=question[:100] if len(question) > 100 else question,
-                                            question=question,
-                                            response=final_response,
-                                            tool_calls=tool_calls))
-
-                    logger.debug("Extracted investigation step %d: %s (with %d tool calls)",
-                                 len(investigation_steps),
-                                 question[:50],
-                                 len(tool_calls))
-
-                except json.JSONDecodeError as e:
-                    logger.warning("Failed to parse nat.metadata JSON for question: %s", e)
-                    continue
-
-            except Exception as e:
-                logger.warning("Failed to extract investigation for question '%s': %s", question[:50], e)
+            if not question:
                 continue
 
+            spans = question_to_spans.get(question, [])
+            
+            if not spans:
+                logger.warning("No matching spans found for question: %s", question[:50])
+                investigation_steps.append(
+                    ChecklistStepDetail(
+                        step_number=i,
+                        title=question[:100] if len(question) > 100 else question,
+                        question=question,
+                        response=response,
+                        tool_calls=[]
+                    )
+                )
+                continue
+            
+            logger.debug("Found %d spans for question: %s", len(spans), question[:50])
+            
+            # Build full investigation from all thought + observation outputs
+            full_investigation_parts = []
+            # final_response = ""
+            
+            for span in spans:
+                func_name = span["function_name"]
+                
+                if func_name == "thought node":
+                    # Add thought input (question) and output (reasoning)
+                    # thought_input = extract_question_from_thought_input(span.get("input_value", ""))
+                    thought_output = span.get("output_value", "")
+                    
+                    # if thought_input:
+                    #     full_investigation_parts.append(f"Question: {thought_input}")
+                    if thought_output:
+                        full_investigation_parts.append(f"Thought: {thought_output}")
+                
+                elif func_name == "observation node":
+                    # Add observation output
+                    obs_output = span.get("output_value", "")
+                    if obs_output:
+                        full_investigation_parts.append(f"Observation: {obs_output}")
+                        # Keep the last observation as potential final response
+                        # final_response = obs_output
+            
+            # Combine all parts
+            full_action_log = "\n\n".join(full_investigation_parts)
+            
+            # Parse tool calls from the investigation
+            tool_calls = APIExtractor._parse_tool_calls_from_action_log(full_action_log)
+            
+            # # Extract final response (look for specific markers or use last observation)
+            # if "Final Answer:" in full_action_log:
+            #     final_response = full_action_log.split("Final Answer:")[-1].strip()
+            # elif not final_response:
+            #     # Use the last significant output
+            #     final_response = full_investigation_parts[-1] if full_investigation_parts else ""
+            
+            # Create ChecklistStepDetail
+            investigation_steps.append(
+                ChecklistStepDetail(
+                    step_number=i,
+                    title=question[:100] if len(question) > 100 else question,
+                    question=question,
+                    response=response,
+                    tool_calls=tool_calls
+                )
+            )
+            
+            logger.debug("Extracted investigation step %d: %s (with %d tool calls)",
+                        i,
+                        question[:50],
+                        len(tool_calls))
+        
         logger.info("Extracted %d investigation steps from %d checklist questions",
                     len(investigation_steps),
                     len(checklist_questions))
         return investigation_steps
+
 
     @staticmethod
     def _parse_tool_calls_from_action_log(action_log: str) -> list[ToolCall]:

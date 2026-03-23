@@ -19,6 +19,7 @@ Handles fetching analysis jobs and traces, and submitting evaluation results.
 """
 
 import os
+import json
 from typing import Any
 from typing import Optional
 
@@ -287,12 +288,35 @@ class ExploitIQClient:
         logger.info("Submitting %d evaluation metrics for job_id=%s", len(payload), job_id)
 
         async with httpx.AsyncClient(timeout=self.config.timeout, verify=False) as client:
+            # try:
+            #     response = await client.post(url, json=payload, headers=self._get_headers())
+            #     response.raise_for_status()
+            #     result = response.json()
+            #     logger.info("Successfully submitted evaluation for job %s", job_id)
+            #     return result
             try:
                 response = await client.post(url, json=payload, headers=self._get_headers())
                 response.raise_for_status()
-                result = response.json()
-                logger.info("Successfully submitted evaluation for job %s", job_id)
-                return result
+                
+                # Handle 204 No Content or empty responses
+                if response.status_code == 204:
+                    logger.info("Successfully submitted evaluation for job %s (204 No Content)", job_id)
+                    return {"status": "success", "message": "Evaluation submitted"}
+                
+                if not response.content or len(response.content) == 0:
+                    logger.info("Successfully submitted evaluation for job %s (empty response)", job_id)
+                    return {"status": "success", "message": "Evaluation submitted"}
+                
+                # Try to parse JSON
+                try:
+                    result = response.json()
+                    logger.info("Successfully submitted evaluation for job %s", job_id)
+                    return result
+                except json.JSONDecodeError as json_err:
+                    logger.warning("API returned non-JSON response for job %s: %s", job_id, str(json_err))
+                    logger.info("Treating as successful submission (status code %s)", response.status_code)
+                    return {"status": "success", "message": "Evaluation submitted (non-JSON response)"}
+                    
             except httpx.TimeoutException:
                 logger.error("Request timed out submitting evaluation for job %s - data may be too large", job_id)
                 raise
