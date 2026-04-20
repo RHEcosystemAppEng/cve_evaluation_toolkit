@@ -57,7 +57,7 @@ from evaluation.models import FireworksJudge, JudgeConfig
 # Logger with compatibility for both old and new structure
 try:
     from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__)
+    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
 except ImportError:
     # Fallback to vuln_analysis logger
     from vuln_analysis.logging.loggers_factory import LoggingFactory
@@ -89,10 +89,10 @@ class CVEEvaluationOrchestrator:
         # Initialize evaluation metric suites
         logger.info("Initializing evaluation metric suites...")
         self.checklist_suite = ChecklistMetricSuite(judge_model)
+        self.intel_score_suite = IntelScoreMetricSuite(judge_model)
         self.investigation_suite = InvestigationMetricSuite(judge_model)
         self.summary_suite = SummaryMetricSuite(judge_model)
         self.justification_suite = JustificationMetricSuite(judge_model)
-        self.intel_score_suite = IntelScoreMetricSuite(judge_model)
 
         logger.info("CVEEvaluationOrchestrator initialized with all metric suites")
 
@@ -205,6 +205,41 @@ class CVEEvaluationOrchestrator:
             except Exception as e:
                 logger.error("  ERROR: Checklist evaluation failed: %s", e, exc_info=True)
 
+        # 5. Intel Score Evaluation
+        if "intel_score" in stages and parsed_result.intel_score is not None:
+            try:
+                logger.info("Running intel score evaluation...")
+
+                # Extract intel score breakdown from parsed result
+                intel_breakdown = parsed_result.__dict__.get("intel_score_breakdown", {})
+                intel_justifications = parsed_result.__dict__.get("intel_score_justifications", {})
+
+                if intel_breakdown and intel_justifications:
+                    intel_input = IntelScoreEvalInput(
+                        cve_id=parsed_result.cve_id,
+                        cve_description=parsed_result.description,
+                        scores=intel_breakdown,
+                        justifications=intel_justifications,
+                        total_score=parsed_result.intel_score
+                    )
+                    intel_results = self.intel_score_suite.evaluate(intel_input)
+
+                    # Add metrics
+                    for metric_name, result in intel_results.get("individual_results", {}).items():
+                        evaluation_results["metrics"].append({
+                            "llm_node": "CALCULATE_CVE_SCORE",
+                            "metric_name": metric_name.upper().replace(" ", "_"),
+                            "metric_score": result.get("score", 0.0),
+                            "metric_reasoning": result.get("reason", "")
+                        })
+
+                    logger.info("  Intel Score: score=%.2f", intel_results.get("overall_score", 0))
+                else:
+                    logger.warning("  WARNING: Intel score breakdown not available in traces")
+            except Exception as e:
+                logger.error("  ERROR: Intel score evaluation failed: %s", e, exc_info=True)
+
+
         # 2. Investigation Evaluation (per step)
         if "investigation" in stages and parsed_result.checklist_step_details:
             try:
@@ -288,40 +323,6 @@ class CVEEvaluationOrchestrator:
                 logger.info("  Justification: score=%.2f", justification_results.get("overall_score", 0))
             except Exception as e:
                 logger.error("  ERROR: Justification evaluation failed: %s", e, exc_info=True)
-
-        # 5. Intel Score Evaluation
-        if "intel_score" in stages and parsed_result.intel_score is not None:
-            try:
-                logger.info("Running intel score evaluation...")
-
-                # Extract intel score breakdown from parsed result
-                intel_breakdown = parsed_result.__dict__.get("intel_score_breakdown", {})
-                intel_justifications = parsed_result.__dict__.get("intel_score_justifications", {})
-
-                if intel_breakdown and intel_justifications:
-                    intel_input = IntelScoreEvalInput(
-                        cve_id=parsed_result.cve_id,
-                        cve_description=parsed_result.description,
-                        scores=intel_breakdown,
-                        justifications=intel_justifications,
-                        total_score=parsed_result.intel_score
-                    )
-                    intel_results = self.intel_score_suite.evaluate(intel_input)
-
-                    # Add metrics
-                    for metric_name, result in intel_results.get("individual_results", {}).items():
-                        evaluation_results["metrics"].append({
-                            "llm_node": "CALCULATE_CVE_SCORE",
-                            "metric_name": metric_name.upper().replace(" ", "_"),
-                            "metric_score": result.get("score", 0.0),
-                            "metric_reasoning": result.get("reason", "")
-                        })
-
-                    logger.info("  Intel Score: score=%.2f", intel_results.get("overall_score", 0))
-                else:
-                    logger.warning("  WARNING: Intel score breakdown not available in traces")
-            except Exception as e:
-                logger.error("  ERROR: Intel score evaluation failed: %s", e, exc_info=True)
 
         logger.info("")
         logger.info("Evaluation complete: %d metrics computed", len(evaluation_results["metrics"]))
@@ -458,7 +459,8 @@ class CVEEvaluationOrchestrator:
         limit: Optional[int] = None,
         submit_results: bool = True,
         stages: list[str] = None,
-        job_id: str = None
+        job_id: str = None,
+        batch_id: str = None
     ) -> list[dict[str, Any]]:
         """
         Process a batch of jobs from the API.
@@ -487,8 +489,12 @@ class CVEEvaluationOrchestrator:
                 logger.error("Failed to fetch job %s: %s", job_id, e)
                 return []
         else:
-            logger.info("Fetching jobs from API...")
-            jobs = await self.api_client.fetch_jobs(status="completed", limit=limit)
+            if batch_id:
+                logger.info("Fetching jobs from batch: %s", batch_id)
+                jobs = await self.api_client.fetch_jobs(status=None, limit=limit, batch_id=batch_id)
+            else:
+                logger.info("Fetching jobs from API...")
+                jobs = await self.api_client.fetch_jobs(status="completed", limit=limit)
 
         logger.info("Fetched %d jobs", len(jobs))
         
@@ -616,6 +622,14 @@ Examples:
         type=str,
         help="Specific job_id to evaluate (optional). If not provided, processes recent completed jobs based on limit"
     )
+
+    parser.add_argument(
+        "--batch-id",
+        type=str,
+        help="Specific batch_id to evaluate (API mode only). If provided, fetches all jobs from this batch"
+    )
+
+
     parser.add_argument(
         "--output-format",
         choices=["local", "api"],
@@ -685,9 +699,15 @@ Examples:
     # Initialize judge model
     logger.info("Initializing LLM judge model...")
     try:
-        judge_config = JudgeConfig()
+        judge_config_params = {}
+        if os.getenv('JUDGE_MODEL'):
+            judge_config_params['model_name'] = os.getenv('JUDGE_MODEL')
+        if os.getenv('JUDGE_BASE_URL'):
+            judge_config_params['base_url'] = os.getenv('JUDGE_BASE_URL')
+        judge_config = JudgeConfig(**judge_config_params)
         judge_model = FireworksJudge(config=judge_config)
-        logger.info("  Judge model: %s", judge_config.model_name)
+        logger.info("Judge model: %s", judge_config.model_name)
+        logger.info("Judge url: %s", judge_config.base_url)
     except (ValueError, Exception) as e:
         logger.error("")
         logger.error("ERROR: Failed to initialize LLM judge")
@@ -707,7 +727,8 @@ Examples:
                 limit=args.limit,
                 submit_results=args.submit,
                 stages=args.stages,
-                job_id=args.job_id
+                job_id=args.job_id,
+                batch_id=args.batch_id
             )
 
         else:

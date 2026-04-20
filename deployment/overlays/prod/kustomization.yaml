@@ -24,9 +24,6 @@ configMapGenerator:
 - name: evaluation-config
   behavior: replace
   literals:
-  - EXPLOIT_IQ_API_BASE=https://exploit-iq-prod.apps.prod-cluster.com
-  - JUDGE_MODEL=mistralai/mistral-small-3.1-24b-instruct-2503
-  - JUDGE_BASE_URL=https://integrate.api.nvidia.com/v1
   - LOG_LEVEL=INFO
   - EVALUATION_TIMEOUT=300
 

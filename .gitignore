@@ -58,3 +58,4 @@ Thumbs.db
 # Large test data (keep samples only)
 tests/test_data/*.json
 !tests/test_data/sample_*.json
+deployment/overlays/*/kustomization.yaml

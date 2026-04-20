@@ -72,6 +72,7 @@ class ChecklistStepDetail(BaseModel):
     question: str = Field(description="Full investigation question")
     response: str = Field(default="", description="Agent's final response for this step")
     tool_calls: list[ToolCall] = Field(default_factory=list, description="All tool calls made for this step")
+    raw_spans: list[dict] = Field(default_factory=list, description="Raw trace spans for flexible formatting")
 
     class Config:
         extra = "allow"
@@ -653,9 +654,8 @@ class APIExtractor:
             # Prefer intel_score from trace (more detailed), fallback to job if not available
             final_intel_score = trace_intel_score if trace_intel_score is not None else job_intel_score
 
-            # Investigation Steps (from cve_agent_executor LLM traces)
-            # Use timestamp-based method with checklist questions
-            # checklist_step_details = APIExtractor._extract_agent_investigation_from_traces(traces, checklist_questions)
+            # Investigation Steps (from LangGraph thought/observation nodes)
+            # Extract with raw spans for flexible formatting
             checklist_step_details = APIExtractor._extract_agent_investigation_from_traces(traces, checklist_raw)
 
             logger.info("Extracted from traces: description=%d chars, intel_score=%s, investigation_steps=%d",
@@ -754,193 +754,304 @@ class APIExtractor:
 
     @staticmethod
     def _extract_agent_investigation_from_traces(traces: list[dict[str, Any]],
-                                             checklist_items: list[dict]) -> list[ChecklistStepDetail]:
+                                                 checklist_items: list[dict]) -> list[ChecklistStepDetail]:
         """
-        Extract investigation steps from LangGraph trace format.
-
-        New format uses 'thought node' and 'observation node' instead of 'cve_agent_executor'.
-        We group spans by extracting the question from thought node inputs, then match
-        to checklist questions.
-
+        Extract investigation steps from LangGraph trace format using parent_span_id hierarchy.
+        
+        Strategy:
+        1. Collect checklist_question spans (top-level grouping)
+        2. Recursively collect all descendant spans (thought/observation/tool nodes)
+        3. Match checklist_question spans to checklist_items by order
+        4. Questions come from job data (not from traces)
+        
         Args:
             traces: List of trace spans
-            checklist_questions: List of question strings from job checklist
-
+            checklist_items: List of checklist dict items from job (with 'input' and 'response')
+        
         Returns:
-            List of ChecklistStepDetail objects with investigation details
+            List of ChecklistStepDetail objects with investigation details and raw spans
         """
         NODE_FUNCTION_NAMES = {"thought node", "observation node", "pre_process node"}
         
-        investigation_steps = []
+        # Helper: Get string attribute value
+        def get_attr_str(attrs: dict, key: str) -> str:
+            return attrs.get(key, {}).get("stringValue", "")
         
-        # Helper: Extract question from thought node's LLM input
-        def extract_question_from_thought_input(input_value: str) -> str:
+        # Helper: Safe float conversion
+        def safe_float(value, default=0.0):
             try:
-                messages = json.loads(input_value)
-                for msg in messages:
-                    if isinstance(msg, dict) and msg.get("type") == "human":
-                        content = msg.get("content", "")
-                        # Extract from <INVESTIGATION_QUESTION> tags if present
-                        if "<INVESTIGATION_QUESTION>" in content:
-                            start = content.find("<INVESTIGATION_QUESTION>") + len("<INVESTIGATION_QUESTION>")
-                            end = content.find("</INVESTIGATION_QUESTION>")
-                            if end > start:
-                                return content[start:end].strip()
-                        return content
-            except (json.JSONDecodeError, TypeError):
-                pass
-            return ""
+                return float(value) if value else default
+            except (ValueError, TypeError):
+                return default
         
-        # Helper: Normalize question for matching
-        def normalize_question(q: str) -> str:
-            return " ".join(q.lower().split())
+        # Helper: Recursively collect all descendant spans
+        def collect_descendants(parent_id: str, parent_map: dict, depth: int = 0, max_depth: int = 5) -> list[dict]:
+            """Recursively collect all child and grandchild spans"""
+            if depth > max_depth:
+                return []
+            
+            descendants = []
+            direct_children = parent_map.get(parent_id, [])
+            
+            for child in direct_children:
+                descendants.append(child)
+                # Recursively collect grandchildren
+                grandchildren = collect_descendants(child['span_id'], parent_map, depth + 1, max_depth)
+                descendants.extend(grandchildren)
+            
+            return descendants
         
-        # Step 1: Collect all agent-related spans
-        agent_spans = []
+        # Step 1: Collect checklist_question spans
+        checklist_spans = []
         for trace in traces:
             attrs = trace.get("spanPayload", {}).get("span_payload", {}).get("attributes", {})
             metadata = trace.get("spanPayload", {}).get("span_payload", {}).get("metadata", {})
             
-            func_name = attrs.get("nat.function.name", {}).get("stringValue", "")
-            event_type = attrs.get("nat.event_type", {}).get("stringValue", "")
+            func_name = get_attr_str(attrs, "nat.function.name")
+            event_type = get_attr_str(attrs, "nat.event_type")
             
+            if func_name == "checklist_question" and event_type == "FUNCTION_START":
+                checklist_spans.append({
+                    "span_id": metadata.get("span_id", "")[:16],
+                    "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+                })
+        
+        # Sort by time to ensure order
+        checklist_spans.sort(key=lambda s: safe_float(s.get("start_time")))
+        
+        logger.info("Collected %d checklist_question spans", len(checklist_spans))
+        
+        # Step 2: Collect all agent spans and build parent index
+        parent_to_children = {}
+        
+        for trace in traces:
+            attrs = trace.get("spanPayload", {}).get("span_payload", {}).get("attributes", {})
+            metadata = trace.get("spanPayload", {}).get("span_payload", {}).get("metadata", {})
+            
+            func_name = get_attr_str(attrs, "nat.function.name")
+            subspan_name = get_attr_str(attrs, "nat.subspan.name")
+            event_type = get_attr_str(attrs, "nat.event_type")
+            
+            span_id = metadata.get("span_id", "")[:16]
+            parent_span_id = metadata.get("parent_span_id", "")[:16]
+            
+            # Collect agent spans (thought/observation/tool)
             if func_name in NODE_FUNCTION_NAMES:
                 span_data = {
+                    "span_id": span_id,
+                    "parent_span_id": parent_span_id,
                     "function_name": func_name,
-                    "input_value": attrs.get("input.value", {}).get("stringValue", ""),
-                    "output_value": attrs.get("output.value", {}).get("stringValue", ""),
-                    "start_time": attrs.get("nat.event_timestamp", {}).get("stringValue", ""),
-                    "metadata": attrs.get("nat.metadata", {}).get("stringValue", "")
+                    "subspan_name": subspan_name,
+                    "span_kind": "FUNCTION",
+                    "event_type": event_type,
+                    "input_value": get_attr_str(attrs, "input.value"),
+                    "output_value": get_attr_str(attrs, "output.value"),
+                    "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+                    "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
+                    "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
                 }
-                agent_spans.append(span_data)
+                parent_to_children.setdefault(parent_span_id, []).append(span_data)
+            
+            elif event_type == "TOOL_START":
+                span_data = {
+                    "span_id": span_id,
+                    "parent_span_id": parent_span_id,
+                    "function_name": subspan_name or func_name,
+                    "subspan_name": subspan_name,
+                    "span_kind": "TOOL",
+                    "event_type": event_type,
+                    "input_value": get_attr_str(attrs, "input.value"),
+                    "output_value": get_attr_str(attrs, "output.value"),
+                    "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+                    "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
+                    "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
+                }
+                parent_to_children.setdefault(parent_span_id, []).append(span_data)
         
-        # Sort by timestamp
-        agent_spans.sort(key=lambda s: s.get("start_time", ""))
+        logger.info("Built parent index with %d unique parents", len(parent_to_children))
         
-        logger.debug("Collected %d agent spans (thought/observation nodes)", len(agent_spans))
+        # Step 3: Match checklist_items to checklist_question spans by order
+        investigation_steps = []
         
-        # Step 2: Group spans by question 
-        question_to_spans = {}
-        current_question = None
-
-        # Build a list of questions from checklist_items for matching
-        checklist_questions = [item.get("input", "") for item in checklist_items if item.get("input")]
-        
-        for span in agent_spans:
-            # If it's a thought node, extract the question
-            if span["function_name"] == "thought node":
-                extracted_q = extract_question_from_thought_input(span.get("input_value", ""))
-                if extracted_q:
-                    norm_extracted = normalize_question(extracted_q)
-                    
-                    # Try to match to one of the checklist questions
-                    matched = None
-                    for checklist_q in checklist_questions:
-                        norm_checklist = normalize_question(checklist_q)
-                        # Use substring matching (first 60 chars)
-                        if norm_extracted[:60] in norm_checklist or norm_checklist[:60] in norm_extracted:
-                            matched = checklist_q
-                            break
-                    
-                    if matched:
-                        current_question = matched
-                        question_to_spans.setdefault(matched, []).append(span)
-                    else:
-                        # Question not in checklist, create a new group
-                        current_question = extracted_q
-                        question_to_spans.setdefault(extracted_q, []).append(span)
-            else:
-                # observation/pre_process nodes follow the most recent thought
-                if current_question:
-                    question_to_spans.setdefault(current_question, []).append(span)
-        
-        logger.info("Grouped spans into %d question groups", len(question_to_spans))
-        
-        # Step 3: Build investigation steps for each checklist question
         for i, checklist_item in enumerate(checklist_items, 1):
-            # spans = question_to_spans.get(checklist_q, [])
             question = checklist_item.get("input", "")
             response = checklist_item.get("response", "")
-
+            
             if not question:
                 continue
-
-            spans = question_to_spans.get(question, [])
             
-            if not spans:
-                logger.warning("No matching spans found for question: %s", question[:50])
+            # Match by order (i-1 because enumerate starts at 1)
+            if i - 1 < len(checklist_spans):
+                cq_span_id = checklist_spans[i - 1]["span_id"]
+                
+                # Recursively collect all descendant spans
+                all_descendants = collect_descendants(cq_span_id, parent_to_children)
+                
+                # Sort by time
+                all_descendants.sort(key=lambda s: safe_float(s.get("start_time", "")))
+                
+                logger.debug("Question %d: Collected %d descendant spans", i, len(all_descendants))
+                
+                # Build tool_calls for backward compatibility
+                tool_calls = APIExtractor._build_tool_calls_from_spans(all_descendants)
+                
+                # Save ChecklistStepDetail with raw_spans
                 investigation_steps.append(
                     ChecklistStepDetail(
                         step_number=i,
                         title=question[:100] if len(question) > 100 else question,
                         question=question,
                         response=response,
-                        tool_calls=[]
+                        tool_calls=tool_calls,
+                        raw_spans=all_descendants
                     )
                 )
-                continue
-            
-            logger.debug("Found %d spans for question: %s", len(spans), question[:50])
-            
-            # Build full investigation from all thought + observation outputs
-            full_investigation_parts = []
-            # final_response = ""
-            
-            for span in spans:
-                func_name = span["function_name"]
                 
-                if func_name == "thought node":
-                    # Add thought input (question) and output (reasoning)
-                    # thought_input = extract_question_from_thought_input(span.get("input_value", ""))
-                    thought_output = span.get("output_value", "")
-                    
-                    # if thought_input:
-                    #     full_investigation_parts.append(f"Question: {thought_input}")
-                    if thought_output:
-                        full_investigation_parts.append(f"Thought: {thought_output}")
-                
-                elif func_name == "observation node":
-                    # Add observation output
-                    obs_output = span.get("output_value", "")
-                    if obs_output:
-                        full_investigation_parts.append(f"Observation: {obs_output}")
-                        # Keep the last observation as potential final response
-                        # final_response = obs_output
-            
-            # Combine all parts
-            full_action_log = "\n\n".join(full_investigation_parts)
-            
-            # Parse tool calls from the investigation
-            tool_calls = APIExtractor._parse_tool_calls_from_action_log(full_action_log)
-            
-            # # Extract final response (look for specific markers or use last observation)
-            # if "Final Answer:" in full_action_log:
-            #     final_response = full_action_log.split("Final Answer:")[-1].strip()
-            # elif not final_response:
-            #     # Use the last significant output
-            #     final_response = full_investigation_parts[-1] if full_investigation_parts else ""
-            
-            # Create ChecklistStepDetail
-            investigation_steps.append(
-                ChecklistStepDetail(
-                    step_number=i,
-                    title=question[:100] if len(question) > 100 else question,
-                    question=question,
-                    response=response,
-                    tool_calls=tool_calls
+                logger.debug("Extracted investigation step %d: %s (%d spans, %d tool calls)",
+                            i,
+                            question[:50],
+                            len(all_descendants),
+                            len(tool_calls))
+            else:
+                # No matching checklist_question span
+                logger.warning("No matching checklist_question span for question %d: %s", i, question[:50])
+                investigation_steps.append(
+                    ChecklistStepDetail(
+                        step_number=i,
+                        title=question[:100] if len(question) > 100 else question,
+                        question=question,
+                        response=response,
+                        tool_calls=[],
+                        raw_spans=[]
+                    )
                 )
-            )
-            
-            logger.debug("Extracted investigation step %d: %s (with %d tool calls)",
-                        i,
-                        question[:50],
-                        len(tool_calls))
         
-        logger.info("Extracted %d investigation steps from %d checklist questions",
+        logger.info("Extracted %d investigation steps from %d checklist items",
                     len(investigation_steps),
-                    len(checklist_questions))
+                    len(checklist_items))
         return investigation_steps
 
+    @staticmethod
+    def _build_tool_calls_from_spans(spans: list[dict]) -> list[ToolCall]:
+        """
+        Build ToolCall objects from raw spans (thought/observation/tool nodes).
+        
+        Extracts complete information including thought, reason, tool, and observation.
+        
+        Args:
+            spans: List of raw span dictionaries
+        
+        Returns:
+            List of ToolCall objects
+        """
+        tool_calls = []
+        current_thought = ""
+        current_reason = ""
+        step_id = 1
+        
+        for idx, span in enumerate(spans):
+            func_name = span["function_name"]
+            span_kind = span.get("span_kind", "FUNCTION")
+            
+            if func_name == "thought node":
+                # Extract thought and actions (including reason)
+                # Only process "full" thought nodes that have actual thought content
+                # Skip "simple" thought nodes that only have mode/step (length < 50)
+                output_value = span.get("output_value", "{}")
+                
+                if len(output_value) < 50:
+                    # Skip simple thought nodes like {"mode": "act", "step": 1}
+                    continue
+                
+                try:
+                    thought_json = json.loads(output_value)
+                    current_thought = thought_json.get("thought", "")
+                    # Extract actions (tool, reason, etc.)
+                    actions = thought_json.get("actions") or {}
+                    current_reason = actions.get("reason", "")
+                except json.JSONDecodeError:
+                    # If JSON parse fails, try to extract from string representation
+                    current_thought = output_value
+                    current_reason = ""
+                    
+                    # Try to extract thought and reason from malformed JSON string
+                    if "thought" in output_value and "reason" in output_value:
+                        try:
+                            # Attempt to fix common JSON issues
+                            import ast
+                            parsed = ast.literal_eval(output_value)
+                            if isinstance(parsed, dict):
+                                current_thought = parsed.get("thought", output_value)
+                                current_reason = parsed.get("actions") or {}.get("reason", "")
+                        except:
+                            pass
+            
+            elif span_kind == "TOOL":
+                # Tool call span
+                tool_name = span.get("subspan_name") or span.get("function_name")
+                tool_input = span.get("input_value", "")
+                
+                # Find next observation node for output
+                tool_output = ""
+                for j in range(idx + 1, min(idx + 5, len(spans))):  # Check next 4 spans
+                    if spans[j]["function_name"] == "observation node":
+                        obs_span = spans[j]
+                        output_value = obs_span.get("output_value", "")
+                        
+                        # Skip if output_value is empty or too short (likely metadata only)
+                        if not output_value or len(output_value) < 50:
+                            continue
+                        
+                        try:
+                            obs_json = json.loads(output_value)
+                            
+                            # Check if it has results (the actual tool output)
+                            if "results" in obs_json:
+                                results = obs_json.get("results", [])
+                                if isinstance(results, list) and len(results) > 0:
+                                    tool_output = "\n".join(str(r)[:2000] for r in results[:5])
+                                    break  # Found the real output
+                                elif results:  # Non-empty results (not a list)
+                                    tool_output = str(results)[:2000]
+                                    break
+                            
+                            # If no results but has content field or other meaningful data
+                            elif len(output_value) > 100:  # Substantial content
+                                # This might be the actual output in a different format
+                                tool_output = output_value[:2000]
+                                break
+                                
+                        except json.JSONDecodeError:
+                            # If can't parse as JSON but has substantial content
+                            if len(output_value) > 100:
+                                tool_output = output_value[:2000]
+                                break
+                
+                # If still no output found, mark as empty
+                if not tool_output:
+                    tool_output = "[No output captured]"
+                
+                # Combine thought and reason
+                full_thought = current_thought
+                if current_reason:
+                    full_thought = f"{current_thought}\nReason: {current_reason}"
+                
+                tool_calls.append(
+                    ToolCall(
+                        step_id=str(step_id),
+                        tool_name=tool_name,
+                        thought=full_thought,
+                        action=tool_name,
+                        action_input=tool_input,
+                        tool_input=tool_input,
+                        tool_output=tool_output
+                    )
+                )
+                step_id += 1
+                current_thought = ""
+                current_reason = ""
+        
+        return tool_calls
 
     @staticmethod
     def _parse_tool_calls_from_action_log(action_log: str) -> list[ToolCall]:

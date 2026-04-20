@@ -17,7 +17,8 @@ Base LLM Judge for evaluation metrics.
 
 Supports Fireworks API, DeepEval, and various LLM providers.
 """
-
+import httpx
+import json
 import os
 from typing import Any
 from typing import Dict
@@ -48,10 +49,10 @@ class JudgeConfig(BaseModel):
     """
     model_name: str = Field(
         # default="nvidia/nemotron-3-nano",
-        default="meta/llama-3.1-70b-instruct",
+        default="google/gemma-4-26B-A4B-it",
         description="Model name/path for the judge LLM")
     api_key: Optional[str] = Field(default=None, description="API key (defaults to NGC_API_KEY env var)")
-    base_url: str = Field(default="https://integrate.api.nvidia.com/v1", description="API base URL (NVIDIA NIM)")
+    base_url: str = Field(default="https://inference-gateway-agentgateway-system.apps.appeng-lab01.accl-001.lab.rdu2.dc.redhat.com/v1", description="API base URL (NVIDIA NIM)")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="Temperature for generation")
     max_tokens: int = Field(default=2048, gt=0, description="Maximum tokens for generation")
 
@@ -90,7 +91,8 @@ class FireworksJudge(DeepEvalBaseLLM):
             raise ValueError("NGC_API_KEY environment variable must be set")
 
         try:
-            self.client = OpenAI(api_key=api_key, base_url=self.config.base_url)
+            http_client = httpx.Client(verify=False)
+            self.client = OpenAI(api_key=api_key, base_url=self.config.base_url, http_client=http_client, timeout=20.0)
             logger.debug(f"Initialized Judge with model: {self.config.model_name} at {self.config.base_url}")
         except Exception as e:
             logger.error("Failed to initialize OpenAI client: %s", str(e))
@@ -130,10 +132,64 @@ class FireworksJudge(DeepEvalBaseLLM):
             )
             content = response.choices[0].message.content
 
+            logger.debug("=" * 80)
+            logger.debug("RAW MODEL OUTPUT (first 1000 chars):")
+            logger.debug(content[:1000] if content else "[EMPTY]")
+            logger.debug("=" * 80)
+
             # Handle thinking tags (if model uses them)
             if content and "<think>" in content and "</think>" in content:
                 content = content.split("</think>")[-1].strip()
                 logger.debug("Stripped thinking tags from response")
+            
+            if content and "<|channel>" in content and "<channel|>" in content:
+                content = content.split("<channel|>")[-1].strip()
+                logger.debug("Stripped Gemma 4 channel tags")
+            
+            if content and "```json" in content:
+                import re
+                match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
+                if match:
+                    extracted = match.group(1).strip()
+                    logger.debug("Extracted JSON from markdown code block")
+                    content = extracted
+                else:
+                    # Try without newlines (some models use ```json{...}```)
+                    match = re.search(r'```json(.*?)```', content, re.DOTALL)
+                    if match:
+                        extracted = match.group(1).strip()
+                        logger.debug("Extracted JSON from markdown code block (no newlines)")
+                        content = extracted
+            # Also handle plain code blocks with JSON inside
+            if content and "```" in content and "{" in content:
+                match = re.search(r'```\s*\n?(\{.*?\})\s*\n?```', content, re.DOTALL)
+                if match:
+                    extracted = match.group(1).strip()
+                    logger.debug("Extracted JSON from plain code block")
+                    content = extracted
+            
+            if content:
+                try:
+                    json.loads(content)
+                    logger.debug("✓ Valid JSON response")
+                except json.JSONDecodeError as e:
+                    logger.error("=" * 80)
+                    logger.error("INVALID JSON FROM MODEL")
+                    logger.error("=" * 80)
+                    logger.error("Model: %s", self.config.model_name)
+                    logger.error("JSON Error: %s", str(e))
+                    logger.error("Response (first 2000 chars): %s", content[:2000])
+                    logger.error("=" * 80)
+                    logger.error("")
+                    logger.error("This model may not be suitable for GEval metrics.")
+                    logger.error("GEval requires JSON output: {\"score\": 0.8, \"reason\": \"...\"}")
+                    logger.error("")
+                    logger.error("Options:")
+                    logger.error("  1. Try a different model (e.g., Llama 3.1)")
+                    logger.error("  2. Add JSON extraction logic to handle mixed output")
+                    logger.error("  3. Use structured output with response_format")
+                    logger.error("=" * 80)
+                    raise ValueError(f"Model returned invalid JSON: {str(e)}")
 
             return content or ""
             
@@ -149,6 +205,7 @@ class FireworksJudge(DeepEvalBaseLLM):
         except BadRequestError as e:
             error_msg = str(e)
             if "model" in error_msg.lower():
+                logger.error(error_msg)
                 logger.error("Model error with %s - verify model name is correct", self.config.model_name)
             else:
                 logger.error("Bad request to NGC API: %s", error_msg)
@@ -202,7 +259,13 @@ class DirectJudge:
             raise ValueError("NGC_API_KEY environment variable must be set")
 
         try:
-            self.client = OpenAI(api_key=api_key, base_url=self.config.base_url)
+            http_client = httpx.Client(verify=False)
+            self.client = OpenAI(
+                api_key=api_key, 
+                base_url=self.config.base_url,
+                http_client=http_client,
+                timeout=300.0
+            )
             logger.debug(f"Initialized DirectJudge with model: {self.config.model_name}")
         except Exception as e:
             logger.error("Failed to initialize OpenAI client: %s", str(e))

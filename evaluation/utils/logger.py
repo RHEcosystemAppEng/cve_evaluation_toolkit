@@ -26,6 +26,14 @@ def get_logger(name: str, level: Optional[str] = None) -> logging.Logger:
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
+        import os
+        log_file = os.getenv('LOG_FILE')
+        if log_file:
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+            print(f"📝 Logging to: {log_file}")
 
     # Set level
     log_level = level or 'INFO'

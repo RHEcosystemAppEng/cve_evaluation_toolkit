@@ -80,23 +80,30 @@ class ExploitIQClient:
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
         reraise=True
     )
-    async def fetch_jobs(self, status: str = "completed", limit: Optional[int] = None) -> list[dict[str, Any]]:
+    async def fetch_jobs(self, status: Optional[str] = "completed", limit: Optional[int] = None, batch_id: Optional[str] = None) -> list[dict[str, Any]]:
         """
         Fetch jobs from the API with automatic retry on timeout/connection errors.
 
         Args:
             status: Filter by job status (default: "completed")
             limit: Maximum number of jobs to fetch
+            batch_id: FILTER by specific batch_id (optional)
 
         Returns:
             List of job dictionaries
         """
         url = f"{self.base_url}/api/v1/jobs/all"
-        params = {"status": status}
+        params = {}
+        if status:
+            params["status"] = status
         if limit:
             params["limit"] = limit
+        if batch_id:
+            params["batch_id"] = batch_id
+            logger.info("Fetching jobs from batch_id=%s from %s", batch_id, url)
+        else:
+            logger.info("Fetching jobs with status=%s from %s", status or "all", url)
 
-        logger.info("Fetching jobs with status=%s from %s", status, url)
 
         async with httpx.AsyncClient(timeout=self.config.timeout, verify=False) as client:
             try:

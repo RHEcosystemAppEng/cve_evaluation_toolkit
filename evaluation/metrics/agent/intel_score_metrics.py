@@ -19,7 +19,7 @@ Evaluates the quality and accuracy of LLM-generated CVE intelligence scores.
 Verifies that scores accurately reflect the technical depth of CVE data
 and justifications are grounded in evidence.
 """
-
+import os
 from typing import Any
 from typing import Optional
 
@@ -29,6 +29,15 @@ from deepeval.test_case import LLMTestCase
 from deepeval.test_case import LLMTestCaseParams
 from pydantic import BaseModel
 from pydantic import Field
+from evaluation.extractors.data_extractor import ToolCall
+
+# Add logger
+try:
+    from evaluation.utils.logger import get_logger
+    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Scoring Criteria Reference (for eval context)
@@ -122,25 +131,32 @@ def create_intel_score_fidelity_metric(judge_model: DeepEvalBaseLLM, threshold: 
         INPUT: Original CVE data (description, CVSS, CWE)
         ACTUAL OUTPUT: Generated scores and justifications for 8 dimensions
 
-        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
-
         EVALUATION CRITERIA:
 
-        1. EVIDENCE GROUNDING (60% weight):
+        1. EVIDENCE GROUNDING (50% weight):
         - Every claim in justifications must exist in the CVE data
         - No fabricated function names, versions, or details
         - Justifications cite specific facts from the CVE text
 
-        2. SCORE CALIBRATION (40% weight):
-        - Detailed CVE (specific functions, attack vectors) → High scores (70-100)
-        - Moderate detail CVE → Medium scores (40-70)
-        - Vague CVE → Low scores (0-40)
+        2. SCORE CALIBRATION (30% weight):
+        - **PROPORTIONALITY**: The score must reflect the information density of the CVE. 
+            - High Score (70-100): CVE provides specific function names, code-level root causes, and clear exploit steps.
+            - Medium Score (40-70): CVE identifies the vulnerable component and impact, but lacks specific code locations.
+            - Low Score (0-40): CVE is vague (e.g., "an issue was found in X product").
+        - **REASONING CONSISTENCY**: If a justification says "No information provided," the score for that dimension MUST be 0.
+
+        3. MATHEMATICAL INTEGRITY (20% weight):
+        - **SUM CHECK**: The `TOTAL` score must be the exact mathematical sum of the 8 individual dimension scores.
+        - **SCORING GUIDE**: Deduct 0.2 points from the final fidelity score for any summation error.
+
 
         SCORING:
         0.0-0.3: Hallucinations or wildly miscalibrated scores
         0.4-0.6: Mostly accurate with minor issues
-        0.7-0.8: Good grounding and calibration
-        0.9-1.0: Perfect evidence grounding and calibration
+        0.7-0.8: Good grounding and calibration. Justifications cite specific parts of the CVE
+        0.9-1.0: Perfect evidence grounding and calibration. Scores perfectly reflect the technical depth of the CVE.
+
+        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
         """,
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
@@ -220,6 +236,13 @@ class IntelScoreMetricSuite:
         scores_output = self._format_scores_output(input_data)
 
         test_case = LLMTestCase(input=cve_input, actual_output=scores_output)
+        logger.debug("="*80)
+        logger.debug("INTEL SCORE TEST CASE")
+        logger.debug("="*80)
+        logger.debug("Input: %s", test_case.input)
+        logger.debug("-"*80)
+        logger.debug("Actual Output:\n%s", test_case.actual_output)
+        logger.debug("="*80)
 
         # Run fidelity metric
         try:

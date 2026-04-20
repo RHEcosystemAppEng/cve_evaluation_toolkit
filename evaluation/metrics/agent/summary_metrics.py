@@ -21,7 +21,7 @@ Single GEval metric for evaluating CVE analysis summaries based on the SUMMARY_P
 3. Cites specific evidence (function names, file paths, components)
 4. Uses only definitive findings, ignores inconclusive items
 """
-
+import os
 from typing import Any
 
 from deepeval.metrics import GEval
@@ -30,6 +30,15 @@ from deepeval.test_case import LLMTestCase
 from deepeval.test_case import LLMTestCaseParams
 from pydantic import BaseModel
 from pydantic import Field
+from evaluation.extractors.data_extractor import ToolCall
+
+# Add logger
+try:
+    from evaluation.utils.logger import get_logger
+    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Data Models
@@ -207,6 +216,13 @@ class SummaryMetricSuite:
         test_case = LLMTestCase(input=f"CVE: {input_data.cve_id}\nDescription: {input_data.cve_description}",
                                 actual_output=input_data.summary,
                                 context=[context_str])
+        logger.debug("="*80)
+        logger.debug("SUMMARY TEST CASE")
+        logger.debug("="*80)
+        logger.debug("Input: %s", test_case.input)
+        logger.debug("-"*80)
+        logger.debug("Actual Output:\n%s", test_case.actual_output)
+        logger.debug("="*80)
 
         try:
             self.quality_metric.measure(test_case)

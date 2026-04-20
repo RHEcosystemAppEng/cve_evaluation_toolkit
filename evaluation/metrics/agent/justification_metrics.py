@@ -21,7 +21,7 @@ Single GEval metric for evaluating CVE justification (label + reason) based on J
 3. Reason must cite evidence from the summary
 4. Label and reason must be logically aligned
 """
-
+import os
 from typing import Any
 
 from deepeval.metrics import GEval
@@ -30,6 +30,15 @@ from deepeval.test_case import LLMTestCase
 from deepeval.test_case import LLMTestCaseParams
 from pydantic import BaseModel
 from pydantic import Field
+from evaluation.extractors.data_extractor import ToolCall
+
+# Add logger
+try:
+    from evaluation.utils.logger import get_logger
+    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -222,6 +231,13 @@ class JustificationMetricSuite:
             actual_output=justification_output,
             context=[input_data.summary] if input_data.summary else ["No summary available"]
         )
+        logger.debug("="*80)
+        logger.debug("JUSTIFICATION TEST CASE")
+        logger.debug("="*80)
+        logger.debug("Input: %s", test_case.input)
+        logger.debug("-"*80)
+        logger.debug("Actual Output:\n%s", test_case.actual_output)
+        logger.debug("="*80)
 
         try:
             self.quality_metric.measure(test_case)

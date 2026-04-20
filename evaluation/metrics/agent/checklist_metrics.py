@@ -6,7 +6,7 @@ the quality of generated investigation checklists for CVE analysis.
 
 Uses DeepEval's GEval and PromptAlignmentMetric for comprehensive evaluation.
 """
-
+import os
 from typing import Any
 from typing import Optional
 
@@ -17,6 +17,16 @@ from deepeval.test_case import LLMTestCase
 from deepeval.test_case import LLMTestCaseParams
 from pydantic import BaseModel
 from pydantic import Field
+
+from evaluation.extractors.data_extractor import ToolCall
+
+# Add logger
+try:
+    from evaluation.utils.logger import get_logger
+    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Data Models
@@ -59,7 +69,7 @@ def create_checklist_prompt_alignment_metric(judge_model: DeepEvalBaseLLM,
         prompt_instructions=[
             # "Output must be a Python list format with items in quotes",
             "The list must contain exactly 3 to 5 items",
-            "Each item must be a question starting with Is, Does, Are, Can, Has, or similar interrogative",
+            "Each item must have a question starting with Is, Does, Are, Can, Has, or similar interrogative",
             "Each question must be specific and include technical details (function names, package names)",
             "Questions should be answerable by code search or documentation search tools",
             "The first question should verify if the vulnerable function is called in the codebase",
@@ -88,8 +98,8 @@ def create_checklist_quality_metric(judge_model: DeepEvalBaseLLM, threshold: flo
 
         1. RELEVANCE (0.30 weight):
            - Are the questions directly relevant to the CVE vulnerability?
-           - Do they address the specific attack vector described?
-           - Do they focus on exploitability factors?
+           - Do they focus on the specific attack vector?
+           - NEGATIVE CONSTRAINT: Score 0 if the questions refer to functions or packages not mentioned in the CVE context (hallucination).
 
         2. COMPLETENESS (0.25 weight):
            - Does the checklist cover the vulnerability chain?
@@ -152,9 +162,22 @@ class ChecklistMetricSuite:
         """
         results = {}
         checklist_str = "\n".join(f"- {item}" for item in input_data.checklist_items)
+        formatted_input = f"""
+        ### VULNERABILITY CONTEXT
+        - **CVE ID**: {input_data.cve_id}
+        - **Description**: {input_data.cve_description}
+        ### AVAILABLE ANALYSIS TOOLS
+        {", ".join(input_data.available_tools)}
+        """
 
-        test_case = LLMTestCase(input=f"CVE: {input_data.cve_id}\nDescription: {input_data.cve_description}",
-                                actual_output=checklist_str)
+        test_case = LLMTestCase(input=formatted_input, actual_output=checklist_str)
+        logger.debug("="*80)
+        logger.debug("CHECKLIST TEST CASE")
+        logger.debug("="*80)
+        logger.debug("Input: %s", test_case.input)
+        logger.debug("-"*80)
+        logger.debug("Actual Output:\n%s", test_case.actual_output)
+        logger.debug("="*80)
 
         # Prompt Alignment
         try:
