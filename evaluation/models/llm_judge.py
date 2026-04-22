@@ -20,6 +20,7 @@ Supports Fireworks API, DeepEval, and various LLM providers.
 import httpx
 import json
 import os
+import sys
 from typing import Any
 from typing import Dict
 from typing import List
@@ -207,6 +208,7 @@ class FireworksJudge(DeepEvalBaseLLM):
             if "model" in error_msg.lower():
                 logger.error(error_msg)
                 logger.error("Model error with %s - verify model name is correct", self.config.model_name)
+                sys.exit(1)
             else:
                 logger.error("Bad request to NGC API: %s", error_msg)
             raise
@@ -215,6 +217,33 @@ class FireworksJudge(DeepEvalBaseLLM):
             raise
         except Exception as e:
             logger.error("Unexpected error during LLM generation: %s", str(e), exc_info=True)
+            raise
+    
+    def health_check(self) -> bool:
+        """
+        Test LLM connection without JSON validation.
+        
+        Returns:
+            True if connection successful, raises exception otherwise
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model= self.config.model_name,
+                messages=[{"role": "user", "content": "Hello"}],
+                max_tokens=50,
+                temperature=0.0
+            )
+            
+            content = response.choices[0].message.content
+            
+            if content and len(content.strip()) > 0:
+                logger.debug("Health check passed: received response of %d chars", len(content))
+                return True
+            else:
+                raise ConnectionError("Health check failed: empty response")
+                
+        except (APIConnectionError, AuthenticationError) as e:
+            logger.error("Health check failed: %s", e)
             raise
 
     async def a_generate(self, prompt: str) -> str:

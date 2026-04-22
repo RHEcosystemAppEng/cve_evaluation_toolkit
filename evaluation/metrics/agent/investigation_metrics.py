@@ -10,6 +10,7 @@ Agent Investigation Evaluation Metrics.
 
 import json
 import os
+import re
 from typing import Any
 
 from deepeval.metrics import GEval
@@ -157,9 +158,6 @@ def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float 
         - Does the answer directly address what was asked?
         - Is the answer specific to the question, not generic?
         - Does the conclusion follow from the investigation?
-        - **Semantic Equality**: In the context of CVE scanning, the response "I do not have a definitive answer" is SEMANTICALLY EQUIVALENT to "I found no evidence in the current scope." 
-        - Do NOT penalize the agent for using a generic refusal if the investigation trace shows that the search results were actually empty/failed. This is an honest, low-risk answer.
-        Note: If the investigation trace shows exhaustive searching but no evidence is found, a conclusion stating the inability to confirm (with reasons) is considered RELEVANT and logically sound.
 
         B. EVIDENCE SUPPORT (50% weight):
         - Is the answer backed by evidence from tool outputs?
@@ -170,28 +168,34 @@ def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float 
 
         SCORING RUBRIC:
 
-        Score 0.0-0.2 (CRITICAL FAIL):
-        - Answer is completely unrelated to the topic.
-        - Agent claims a vulnerability exists when tools say it doesn't.
-        - **Note: A "no definitive answer" response is NOT a 0-score if the trace shows relevant tool calls. This is a "Negative Conclusion", not a "No Answer".**
-        - **Note: Do NOT use this score just because the response is generic, as long as tool calls were made.**
+        Score 0.0-0.2 (FAIL):
+        - Answer doesn't address the question OR
+        - No evidence provided, claims made without verification
+        - "I don't know" without investigation attempt
 
-        Score 0.3-0.5 (ADEQUATE / CONSERVATIVE):
-        - **[Target Zone]**: The agent investigated (2+ tool calls) but found no evidence.
-        - The agent chooses a conservative "no definitive answer" instead of a summary. 
-        - While suboptimal, this shows the agent correctly avoided making up facts. 
-        - **This must score at least 0.4 if the investigation steps were relevant to the package or function name.**
+        Score 0.3-0.4 (POOR):
+        - Answer tangentially related to question
+        - Single source only, no verification
+        - Vague claims without specific citations
 
-        Score 0.6-0.8 (GOOD):
-        - Answer clearly addresses the question based on findings.
-        - **If the answer is "No" or "Uncertain", the agent must have tried at least 2-3 different logical queries (e.g., package name, then specific function keyword).**
-        - Evidence (even if it's "no results found") supports the final conclusion.
+        Score 0.5-0.6 (ADEQUATE):
+        - Answer addresses question but incompletely
+        - Some evidence provided, basic citations
+        - At least 2 sources consulted
+
+        Score 0.7-0.8 (GOOD):
+        - Answer clearly addresses the question
+        - Multiple sources triangulated
+        - Specific citations (file paths, function names)
+        - Evidence clearly supports conclusion
 
         Score 0.9-1.0 (EXCELLENT):
-        - Answer thoroughly addresses the question.
-        - **For negative findings:** Agent provides a "reasoned denial" (e.g., "I searched for the package X and the specific function Y across the codebase with no results, therefore it is likely not present").
-        - **For positive findings:** Comprehensive evidence with specific citations (files, functions).
-        - Acknowledges limitations (e.g., "Keyword search returned nothing, but semantic search for the protocol logic also showed no relevant implementation").
+        - Answer thoroughly and specifically addresses question
+        - Comprehensive evidence from multiple tools
+        - Verified findings from multiple angles
+        - Specific, traceable citations throughout
+        - Clear distinction between confirmed facts and inferences
+        - Acknowledges limitations where appropriate
         """,
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
@@ -223,44 +227,51 @@ def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: flo
 
         In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
 
-        IMPORTANT: Investigating prerequisite conditions (e.g., "Is function X reachable?")
-        is NOT a tangent if it determines whether downstream concerns (e.g., "validation",
-        "configurations") are relevant. Such investigation paths should score highly if
-        logical and well-justified.
-
         EVALUATION DIMENSIONS:
 
         A. LOGICAL COHERENCE (50% weight):
-        - **Prerequisite Logic**: If the agent fails to find the package (e.g., 'go-git' returns no results), it is LOGICALLY CORRECT to stop searching for version details or reachability. You cannot analyze a package that doesn't exist.
-        - **Refinement Strategy**: If an agent fails a search and retries with a more specific keyword (e.g., adding a module path), this is LOGICAL PROGRESS, even if the 'Thought' or 'Reason' text remains similar to maintain the original goal.
-        - **Value of Negative Findings**: Acknowledging that no evidence was found after multiple attempts is a sound logical conclusion.
-        - **Defensive conclusion**: "I do not have a definitive answer" is a safe and logical conclusion when tools yield zero hits.
-        - **Consistency**: Do NOT penalize the agent for saying "no evidence found" in the trace and "no definitive answer" in the final response; these are logically compatible.
+        - Does each Thought logically build on previous Observations?
+        - Are tool selections justified by the Reason provided?
+        - Are there contradictions or circular reasoning?
+        - Does the final conclusion follow from accumulated evidence?
+        - Do the Reasons explain why each step is necessary?
+        - VALORIZE PIVOTING: If a tool returns 'no results found', it is logically sound for the agent to change its search strategy (e.g., from a specific module path to a broader keyword). Do not penalize these shifts as 'lack of focus'.
 
         B. GOAL FOCUS (50% weight):
-        - Did the agent stay on the topic of the specific package and vulnerability?
-        - Did it attempt at least two different search strategies (e.g., short name vs full path)?
+        - Does each step progress toward answering the question?
+        - Are the Reasons provided relevant to the investigation goal?
+        - Are there unnecessary tangents or distractions?
+        - Is the final answer focused on the original question?
 
         SCORING RUBRIC:
 
-        Score 0.0-0.2 (CRITICAL FAILURE):
-        - Agent made NO tool calls or calls completely unrelated tools.
-        - Agent claims a package is present/vulnerable when the tool output explicitly says "no results".
-        - **Note: Do NOT use this score if the agent tried different search terms, even if the 'Thought' text is repetitive.**
+        Score 0.0-0.2 (FAIL):
+        - Incoherent reasoning: contradictions, circular logic
+        - Completely off-topic investigation
+        - Conclusion contradicts evidence found
 
-        Score 0.3-0.5 (MARGINAL / HONEST ATTEMPT):
-        - **[MANDATORY SCORE FOR THIS CASE]**: Agent attempts to find the answer using 2+ relevant tool calls.
-        - Even if the agent repeats the same 'Thought' or 'Reason' text, as long as the **Tool Query/Input changes** (e.g., refining the package name), it shows a valid investigation attempt.
-        - The agent correctly identifies that no evidence was found and provides a cautious final response.
-        - *Penalty*: If the agent missed a secondary part of the question (like the version), score it in this 0.4-0.5 range, but NOT lower.
+        Score 0.3-0.4 (POOR):
+        - Major logic gaps: unexplained jumps in reasoning
+        - More than half of steps are tangential
+        - Tool selections don't match stated goals
 
-        Score 0.6-0.8 (GOOD):
-        - Agent explicitly describes why the previous search failed in the next 'Thought'.
-        - Shows a clear progression from broad to specific queries.
+        Score 0.5-0.6 (ADEQUATE):
+        - Generally logical with minor gaps
+        - Some tangents but mostly on topic
+        - Conclusions mostly follow from evidence
+
+        Score 0.7-0.8 (GOOD):
+        - Each Thought logically follows previous Observations
+        - Reasons clearly justify tool selections
+        - All steps progress toward the answer
+        - No contradictions in reasoning
 
         Score 0.9-1.0 (EXCELLENT):
-        - Perfect synthesis of all search results.
-        - Explains exactly what was tried and why the final conclusion (even if negative) is justified.
+        - Perfect logical chain from question to answer
+        - Every Reason clearly justifies why that step is needed
+        - Tool selections explicitly connected to investigation goals
+        - Efficient, focused investigation with no tangents
+        - Considers multiple angles before concluding
         """,
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
@@ -289,15 +300,17 @@ def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold
         EVALUATION CRITERIA (SEMANTIC ONLY - syntax is evaluated separately):
 
         1. TOOL APPROPRIATENESS (40% weight):
-        - Is the tool choice semantically relevant? 
-        - NOTE: Searching for the package name (e.g., "go-git") via Keyword Search IS a valid first step to confirm the package exists in the codebase, even before locating specific functions.
+        - Was each tool the right choice for its query?
+        - Semantic Search for "how does X work?" questions
+        - Keyword Search for specific names/patterns
+        - CVE Web Search for external exploit/patch info
+        - Function Locator for finding where code is defined
 
         2. TOOL SEQUENCE AND DEPENDENCIES (40% weight):
         - Function Locator MUST precede Call Chain Analyzer (dependency!)
         - Function Locator MUST precede Function Caller Finder (dependency!)
-        - Does the sequence follow a logical flow: Find Package/Info -> Locate Function -> Analyze Reachability.
-        - Do not strictly penalize for skipping "CVE Web Search" if the agent is trying to verify package existence directly in the code.
-        - However, repeating the same tool with nearly identical queries after a failure is considered "low efficiency."
+        - Broad searches (semantic) before narrow analysis (function-level)
+        - Logical progression: understand → locate → trace → verify
 
         GOOD sequence example:
           Step 1: Function Locator (find the function)
@@ -308,8 +321,10 @@ def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold
           Step 1: Call Chain Analyzer (ERROR: no function located yet!)
           Step 2: Function Locator (should have been first)
 
-        3. INPUT SEMANTICS (20% weight):
-        - Is the search term relevant? (e.g., searching for the package mentioned in the question).
+        3. SEMANTIC INPUT CORRECTNESS (20% weight):
+        - Is the input the RIGHT thing to search for?
+        - Does the query target what the question asks?
+        - Are function/package names relevant to the CVE?
         - Example BAD: Question asks about "werkzeug", but searches for "flask"
 
         IMPORTANT: Do NOT penalize for syntax errors (wrong format, missing fields).
@@ -317,23 +332,26 @@ def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold
 
         SCORING RUBRIC:
 
-        Score 0.0-0.2 (CRITICAL FAILURE):
-        - Tools used are completely unrelated to the question (e.g., using Docs search for a code reachability question).
-        - Direct violation of HARD dependencies (e.g., Call Chain Analyzer used without any prior Function Locator/Search).
+        Score 0.0-0.3 (FAIL):
+        - Wrong tools for the task (semantic mismatch)
+        - Violates dependencies (Call Chain before Locator)
+        - Searches for completely irrelevant things
 
-        Score 0.3-0.5 (SUBOPTIMAL / INCOMPLETE):
-        - The agent made a relevant attempt (e.g., searched for the correct package name) but gave up too early.
-        - The sequence is slightly illogical (e.g., should have used Semantic Search to find the 'function related to file transport' instead of just guessing keywords).
-        - **This is the appropriate score for agents that try 1-2 relevant searches but fail to find the answer.**
+        Score 0.4-0.6 (ADEQUATE):
+        - Mostly appropriate tools but suboptimal sequence
+        - Some queries miss the point but not completely wrong
+        - Basic understanding but inefficient approach
 
-        Score 0.6-0.8 (GOOD):
-        - Correct tool choices that align with the investigation goal.
-        - Logical progression (e.g., search package -> try to find specific function).
-        - Semantic queries are well-targeted.
+        Score 0.7-0.8 (GOOD):
+        - Correct tool choices with proper dependencies
+        - Semantically appropriate queries
+        - Logical sequence that builds on previous findings
 
         Score 0.9-1.0 (EXCELLENT):
-        - Optimal path: Used Web/Semantic search to identify the vulnerable function name, then used Locator, then analyzed the chain.
-        - Highly efficient; no redundant steps.
+        - Optimal tool selection for each step
+        - Perfect dependency ordering
+        - Queries precisely target what's needed
+        - Efficient investigation path
         """,
                  evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
                  model=judge_model,
@@ -434,6 +452,10 @@ class InvestigationMetricSuite:
     4. Tool Call Integrity - Only with tool calls
 
     Handles cases with and without tool_calls.
+    
+    OPTIMIZATION NOTES:
+    - Preserves trace structure (PRE_PROCESS → THOUGHT → TOOL → OBSERVATION)
+    - Removes redundant fields
     """
 
     def __init__(self, judge_model: DeepEvalBaseLLM):
@@ -446,6 +468,15 @@ class InvestigationMetricSuite:
         self.tool_selection = create_tool_selection_quality_metric(judge_model)
         self.tool_integrity = create_tool_call_integrity_metric(judge_model)
 
+    def _estimate_token_count(self, text: str) -> int:
+        """
+        Estimate token count for debugging purposes.
+        
+        Uses simple heuristic: ~4 characters per token (average for English text).
+        For accurate counts, use tiktoken library in production.
+        """
+        return len(text) // 4
+    
     def _format_trace(self, tool_calls: list[ToolCall]) -> str:
         """Format tool calls as readable trace (legacy method).
 
@@ -505,6 +536,7 @@ class InvestigationMetricSuite:
         Format for Reasoning Quality metric: focus on thought, reason, and observations.
         
         Shows the logical flow: What the agent thought, why, and what it found.
+        Streamlined version removes memory repetition and verbose context.
         """
         parts = []
         step_num = 1
@@ -540,12 +572,25 @@ class InvestigationMetricSuite:
                 try:
                     obs_json = json.loads(output_val)
                     results = obs_json.get("results", [])
+                    # Streamline results: remove duplicates and CALLED messages
                     if results:
                         if isinstance(results, list):
-                            preview = "\n".join(str(r) for r in results)
+                            # Keep only unique FAILED messages and other non-redundant info
+                            unique_results = []
+                            seen = set()
+                            for r in results:
+                                r_str = str(r)
+                                if 'FAILED:' in r_str and r_str not in seen:
+                                    unique_results.append(r_str)
+                                    seen.add(r_str)
+                                elif 'CALLED:' not in r_str and r_str not in seen:
+                                    unique_results.append(r_str)
+                                    seen.add(r_str)
+                            preview = "\n".join(unique_results) if unique_results else str(results[0])
                         else:
                             preview = str(results)
                         parts.append(f"Observation: {preview}")
+                    # NOTE: Completely ignore 'memory' field - it's redundant CVE context + tool history
                 except json.JSONDecodeError:
                     if output_val:
                         parts.append(f"Observation: {output_val}")
@@ -655,11 +700,100 @@ class InvestigationMetricSuite:
         
         return "\n".join(parts)
     
+    def _streamline_preprocess_node(self, output_str: str) -> str:
+        """Streamline PRE_PROCESS node - remove verbose critical_context."""
+        try:
+            data = json.loads(output_str)
+            minimal = {}
+            
+            # Keep only essential fields
+            if 'selected_package' in data:
+                minimal['selected_package'] = data['selected_package']
+            if 'is_reachability' in data:
+                minimal['is_reachability'] = data['is_reachability']
+            if 'reachability_question' in data:
+                minimal['reachability_question'] = data['reachability_question']
+            
+            return json.dumps(minimal)
+        except:
+            return output_str
+    
+    def _streamline_thought_node(self, output_str: str) -> str:
+        """Streamline THOUGHT node - keep core reasoning only."""
+        try:
+            data = json.loads(output_str)
+            minimal = {}
+            
+            if 'thought' in data:
+                minimal['thought'] = data['thought']
+            
+            if 'mode' in data:
+                minimal['mode'] = data['mode']
+            
+            # Simplify actions
+            if 'actions' in data and data['actions']:
+                actions = data.get('actions') or {}
+                minimal['actions'] = {
+                    'tool': actions.get('tool'),
+                    'query': actions.get('query') or actions.get('function_name') or actions.get('package_name'),
+                    'reason': actions.get('reason')
+                }
+                # Remove None values
+                minimal['actions'] = {k: v for k, v in minimal['actions'].items() if v is not None}
+            
+            return json.dumps(minimal)
+        except:
+            return output_str
+    
+    def _streamline_tool_node(self, output_str: str) -> str:
+        """Streamline TOOL node - name and status only."""
+        try:
+            data = json.loads(output_str)
+            minimal = {
+                'name': data.get('name', 'Unknown'),
+                'status': data.get('status', 'unknown')
+            }
+            return json.dumps(minimal)
+        except:
+            return output_str
+    
+    def _streamline_observation_node(self, output_str: str) -> str:
+        """Streamline OBSERVATION node - results only, NO memory."""
+        try:
+            data = json.loads(output_str)
+            minimal = {}
+            
+            # Keep results but simplify
+            if 'results' in data:
+                results = data['results']
+                if isinstance(results, list):
+                    # Remove duplicates and keep only unique FAILED messages
+                    unique_results = []
+                    seen = set()
+                    for r in results:
+                        if 'FAILED:' in r and r not in seen:
+                            unique_results.append(r)
+                            seen.add(r)
+                        elif 'CALLED:' not in r and r not in seen:  # Keep non-CALLED, non-FAILED messages
+                            unique_results.append(r)
+                            seen.add(r)
+                    minimal['results'] = unique_results if unique_results else results[:1]
+                else:
+                    minimal['results'] = results
+            
+            # COMPLETELY REMOVE memory field - biggest token saver!
+            # Memory contains CVE context (already in question) + tool history (can be inferred)
+            
+            return json.dumps(minimal)
+        except:
+            return output_str
+    
     def _format_complete_trace(self, raw_spans: list[dict]) -> str:
         """
-        Format complete trace for Answer Quality: shows everything.
+        Format complete trace for Answer Quality with streamlined content.
         
-        Includes all thought nodes, observations, and tool calls.
+        Preserves structure (PRE_PROCESS → THOUGHT → TOOL → OBSERVATION)
+        but removes redundant information to reduce token count by ~70%.
         """
         parts = []
         
@@ -668,20 +802,24 @@ class InvestigationMetricSuite:
             
             if fn == "thought node":
                 output = span.get("output_value", "")
-                parts.append(f"\n[Step {i}] THOUGHT:\n{output}")
+                streamlined = self._streamline_thought_node(output)
+                parts.append(f"\n[Step {i}] THOUGHT:\n{streamlined}")
             
             elif fn == "observation node":
                 output = span.get("output_value", "")
-                parts.append(f"\n[Step {i}] OBSERVATION:\n{output}")
+                streamlined = self._streamline_observation_node(output)
+                parts.append(f"\n[Step {i}] OBSERVATION:\n{streamlined}")
             
             elif fn == "pre_process node":
                 output = span.get("output_value", "")
-                parts.append(f"\n[Step {i}] PRE_PROCESS:\n{output}")
+                streamlined = self._streamline_preprocess_node(output)
+                parts.append(f"\n[Step {i}] PRE_PROCESS:\n{streamlined}")
             
             elif span["span_kind"] == "TOOL":
                 tool_name = span.get("subspan_name") or fn
                 output = span.get("output_value", "")
-                parts.append(f"\n[Step {i}] TOOL ({tool_name}):\n{output}")
+                streamlined = self._streamline_tool_node(output)
+                parts.append(f"\n[Step {i}] TOOL ({tool_name}):\n{streamlined}")
         
         return "\n".join(parts) if parts else "[No trace found]"
 
@@ -711,11 +849,14 @@ class InvestigationMetricSuite:
             answer_output = f"--- Final Response ---\n{input_data.final_response}"
         
         answer_test_case = LLMTestCase(input=input_data.checklist_question, actual_output=answer_output)
-        # Add debug logging
+        
+        # Add debug logging with token estimation
+        estimated_tokens = self._estimate_token_count(answer_test_case.actual_output)
         logger.debug("="*80)
         logger.debug("ANSWER QUALITY TEST CASE")
         logger.debug("="*80)
         logger.debug("Input: %s", answer_test_case.input)
+        logger.debug("Estimated tokens (input + output): ~%d", estimated_tokens + self._estimate_token_count(answer_test_case.input))
         logger.debug("-"*80)
         logger.debug("Actual Output:\n%s", answer_test_case.actual_output)
         logger.debug("="*80)

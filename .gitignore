@@ -43,6 +43,9 @@ htmlcov/
 *.swo
 *~
 
+debug-pod-*.yaml
+*-debug.yaml
+
 # Environment variables
 .env
 .env.local

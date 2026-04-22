@@ -28,6 +28,7 @@ Usage:
 
 import argparse
 import asyncio
+import httpx
 import json
 import os
 import sys
@@ -485,6 +486,10 @@ class CVEEvaluationOrchestrator:
             try:
                 job = await self.api_client.fetch_job_by_id(job_id)
                 jobs = [job] if job else []
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                logger.error("CRITICAL: Cannot connect to API - %s", e)
+                logger.error("Please check network, BASE_URL, and API_TOKEN")
+                sys.exit(1)
             except Exception as e:
                 logger.error("Failed to fetch job %s: %s", job_id, e)
                 return []
@@ -708,6 +713,18 @@ Examples:
         judge_model = FireworksJudge(config=judge_config)
         logger.info("Judge model: %s", judge_config.model_name)
         logger.info("Judge url: %s", judge_config.base_url)
+        logger.info("Testing LLM Judge connection...")
+        try:
+            judge_model.health_check()
+            logger.info("LLM Judge connection verified successfully")
+        except Exception as health_check_error:
+            logger.error("LLM Judge health check FAILED: %s", health_check_error)
+            logger.error("CRITICAL: Cannot proceed without working LLM Judge")
+            logger.error("Please check:")
+            logger.error("  1. JUDGE_BASE_URL is correct and accessible")
+            logger.error("  2. JUDGE_MODEL name is correct")
+            logger.error("  3. Network connectivity (VPN, firewall, etc.)")
+            sys.exit(1) 
     except (ValueError, Exception) as e:
         logger.error("")
         logger.error("ERROR: Failed to initialize LLM judge")
