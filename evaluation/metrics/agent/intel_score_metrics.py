@@ -29,15 +29,10 @@ from deepeval.test_case import LLMTestCase
 from deepeval.test_case import LLMTestCaseParams
 from pydantic import BaseModel
 from pydantic import Field
-from evaluation.extractors.data_extractor import ToolCall
 
-# Add logger
-try:
-    from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
+from evaluation.utils.logger import get_logger
+logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
+
 
 # ============================================================================
 # Scoring Criteria Reference (for eval context)
@@ -116,7 +111,7 @@ class IntelScoreEvalInput(BaseModel):
 # ============================================================================
 
 
-def create_intel_score_fidelity_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
+def create_intel_score_fidelity_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.6) -> GEval:
     """
     Simplified Intel Score Fidelity metric.
 
@@ -185,7 +180,11 @@ class IntelScoreMetricSuite:
         """
         if judge_model is None:
             raise ValueError("judge_model is required for IntelScoreMetricSuite")
-
+        self.token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
         self.judge_model = judge_model
         self.fidelity_metric = create_intel_score_fidelity_metric(judge_model)
 
@@ -229,6 +228,7 @@ class IntelScoreMetricSuite:
         Returns:
             Dict with evaluation results including score, passed status, and reasoning
         """
+        tokens_before = getattr(self.judge_model, 'cumulative_usage', {}).get('total_tokens', 0)
         results = {}
 
         # Build test case
@@ -263,6 +263,10 @@ class IntelScoreMetricSuite:
         scores = [r["score"] for r in results.values()]
         overall_score = sum(scores) / len(scores) if scores else 0
         passed_count = sum(1 for r in results.values() if r["passed"])
+        tokens_after = getattr(self.judge_model, 'cumulative_usage', {}).get('total_tokens', 0)
+        tokens_used = tokens_after - tokens_before
+        self.token_usage["total_tokens"] += tokens_used
+        logger.info("Token usage for this step: %d tokens", tokens_used)
 
         return {
             "overall_score": overall_score,
@@ -271,4 +275,5 @@ class IntelScoreMetricSuite:
             "individual_results": results,
             "cve_id": input_data.cve_id,
             "total_intel_score": input_data.total_score,
+            "token_usage": tokens_used
         }

@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-eval = "scripts.run_evaluation:main"
+eval = "scripts.run_cve_evaluation:main"
 parse-test = "scripts.test_data_parser:main"
 
 [build-system]

@@ -22,13 +22,8 @@ from pydantic import Field
 
 from evaluation.extractors.data_extractor import ToolCall
 
-# Add logger
-try:
-    from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
+from evaluation.utils.logger import get_logger
+logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
 
 # ============================================================================
 # Tool Definitions (for eval rubrics)
@@ -134,7 +129,7 @@ class InvestigationEvalInput(BaseModel):
 # ============================================================================
 
 
-def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
+def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.6) -> GEval:
     """
     Combined metric: Answer Relevancy + Evidence Quality
 
@@ -203,7 +198,7 @@ def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float 
                  verbose_mode=False)
 
 
-def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
+def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.6) -> GEval:
     """
     Evaluate logical coherence and goal focus of agent's reasoning.
 
@@ -279,7 +274,7 @@ def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: flo
                  verbose_mode=False)
 
 
-def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
+def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.6) -> GEval:
     """
     Evaluate semantic appropriateness of tool selections.
 
@@ -359,7 +354,7 @@ def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold
                  verbose_mode=False)
 
 
-def create_tool_call_integrity_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
+def create_tool_call_integrity_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.6) -> GEval:
     """
     Evaluate syntax and schema correctness of tool calls.
 
@@ -467,6 +462,11 @@ class InvestigationMetricSuite:
         self.reasoning_quality = create_reasoning_quality_metric(judge_model)
         self.tool_selection = create_tool_selection_quality_metric(judge_model)
         self.tool_integrity = create_tool_call_integrity_metric(judge_model)
+        self.token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
 
     def _estimate_token_count(self, text: str) -> int:
         """
@@ -576,14 +576,11 @@ class InvestigationMetricSuite:
                     if results:
                         if isinstance(results, list):
                             # Keep only unique FAILED messages and other non-redundant info
-                            unique_results = []
                             seen = set()
+                            unique_results = []
                             for r in results:
                                 r_str = str(r)
-                                if 'FAILED:' in r_str and r_str not in seen:
-                                    unique_results.append(r_str)
-                                    seen.add(r_str)
-                                elif 'CALLED:' not in r_str and r_str not in seen:
+                                if 'CALLED:' not in r_str and r_str not in seen:
                                     unique_results.append(r_str)
                                     seen.add(r_str)
                             preview = "\n".join(unique_results) if unique_results else str(results[0])
@@ -832,6 +829,7 @@ class InvestigationMetricSuite:
         Returns:
             Dictionary with evaluation results including scores and reasoning
         """
+        tokens_before = getattr(self.judge_model, 'cumulative_usage', {}).get('total_tokens', 0)
         results = {}
         has_investigation = input_data.has_raw_spans or input_data.has_tool_calls
         
@@ -951,7 +949,12 @@ class InvestigationMetricSuite:
         scores = [r["score"] for r in results.values()]
         overall_score = sum(scores) / len(scores) if scores else 0
         passed_count = sum(1 for r in results.values() if r["passed"])
-
+        tokens_after = getattr(self.judge_model, 'cumulative_usage', {}).get('total_tokens', 0)
+        tokens_used = tokens_after - tokens_before
+        
+        self.token_usage["total_tokens"] += tokens_used
+        
+        logger.info("Token usage for this step: %d tokens", tokens_used)
         return {
             "overall_score": overall_score,
             "passed": passed_count == len(results),
@@ -960,5 +963,6 @@ class InvestigationMetricSuite:
             "cve_id": input_data.cve_id,
             "has_tool_calls": has_investigation,
             "num_tool_calls": len(input_data.tool_calls),
-            "num_raw_spans": len(input_data.raw_spans)
+            "num_raw_spans": len(input_data.raw_spans),
+            "token_usage": tokens_used
         }

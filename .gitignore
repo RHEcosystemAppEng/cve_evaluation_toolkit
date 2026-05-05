@@ -62,3 +62,10 @@ Thumbs.db
 tests/test_data/*.json
 !tests/test_data/sample_*.json
 deployment/overlays/*/kustomization.yaml
+
+#cache/outputs/scratch
+.deepeval/
+.ipynb_checkpoints/
+output/
+extractor.py
+

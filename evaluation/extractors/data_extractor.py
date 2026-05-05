@@ -27,15 +27,8 @@ from typing import Optional
 from pydantic import BaseModel
 from pydantic import Field
 
-# Logger with compatibility for both old and new structure
-try:
-    from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__)
-except ImportError:
-    # Fallback to vuln_analysis logger
-    from vuln_analysis.logging.loggers_factory import LoggingFactory
-    logger = LoggingFactory.get_agent_logger(__name__)
-
+from evaluation.utils.logger import get_logger
+logger = get_logger(__name__)
 
 class ChecklistStep(BaseModel):
     """A single checklist step with title and question."""
@@ -711,36 +704,39 @@ class APIExtractor:
                     event_type = attrs.get("nat.event_type", {}).get("stringValue", "")
                     func_name = attrs.get("nat.function.name", {}).get("stringValue", "")
 
-                    # Find FUNCTION_START + cve_fetch_intel
                     if event_type == "FUNCTION_START" and func_name == "cve_fetch_intel":
                         output_val = attrs.get("output.value", {}).get("stringValue", "")
 
-                        if output_val:
+                        if not output_val:
+                            continue
+
+                        try:
+                            output_json = json.loads(output_val)
+                            intel_list = output_json.get("info", {}).get("intel", [])
+                        except json.JSONDecodeError as e:
+                            logger.warning("Failed to parse CVE output JSON: %s", str(e))
+                            continue
+
+                        for intel_item in intel_list:
                             try:
-                                output_json = json.loads(output_val)
-                                # Extract description from info.intel
-                                intel_list = output_json.get("info", {}).get("intel", [])
-                            except json.JSONDecodeError as e:
-                                logger.warning("Failed to parse CVE output JSON: %s", str(e))
+                                if intel_item.get("vuln_id") != cve_id:
+                                    continue
+
+                                rhsa_details = intel_item.get("rhsa", {}).get("details")
+                                rhsa_desc = rhsa_details[0] if isinstance(rhsa_details, list) and rhsa_details else ""
+
+                                desc = (
+                                    intel_item.get("nvd", {}).get("cve_description")
+                                    or intel_item.get("ghsa", {}).get("description")
+                                    or rhsa_desc
+                                )
+
+                                if desc:
+                                    logger.info("Found CVE description from cve_fetch_intel trace")
+                                    return desc.strip()
+
+                            except (TypeError, AttributeError):
                                 continue
-                            
-                            try:
-
-                                for intel_item in intel_list:
-                                    if intel_item.get("vuln_id") == cve_id:
-                                        # Priority: nvd > ghsa > rhsa
-                                        desc = (intel_item.get("nvd", {}).get("cve_description")
-                                                or intel_item.get("ghsa", {}).get("description")
-                                                or (intel_item.get("rhsa", {}).get("details", [""])[0] if isinstance(
-                                                    intel_item.get("rhsa", {}).get("details"), list) else ""))
-
-                                        if desc:
-                                            logger.info("Found CVE description from cve_fetch_intel trace")
-                                            return desc.strip()
-
-                            except json.JSONDecodeError as e:
-                                logger.debug("Failed to parse output.value JSON: %s", e)
-                                pass
 
                 except (KeyError, TypeError):
                     continue
@@ -778,9 +774,21 @@ class APIExtractor:
             return attrs.get(key, {}).get("stringValue", "")
         
         # Helper: Safe float conversion
-        def safe_float(value, default=0.0):
+        def safe_float(value, default=float('inf')):
+            """Convert to float, returning default for None/empty/invalid values."""
+            if value is None or value == "":
+                return default
             try:
-                return float(value) if value else default
+                return float(value)
+            except (ValueError, TypeError):
+                return default
+        
+        def safe_timestamp(value, default=None):
+            """Convert to float timestamp, None if invalid."""
+            if not value:
+                return default
+            try:
+                return float(value)
             except (ValueError, TypeError):
                 return default
         
@@ -812,12 +820,13 @@ class APIExtractor:
             
             if func_name == "checklist_question" and event_type == "FUNCTION_START":
                 checklist_spans.append({
-                    "span_id": metadata.get("span_id", "")[:16],
+                    "span_id": (metadata.get("span_id") or "")[:16],
                     "start_time": get_attr_str(attrs, "nat.event_timestamp"),
                 })
         
         # Sort by time to ensure order
-        checklist_spans.sort(key=lambda s: safe_float(s.get("start_time")))
+        checklist_spans = [s for s in checklist_spans if safe_timestamp(s.get("start_time")) is not None]
+        checklist_spans.sort(key=lambda s: safe_timestamp(s.get("start_time"), 0.0))
         
         logger.info("Collected %d checklist_question spans", len(checklist_spans))
         
@@ -832,8 +841,8 @@ class APIExtractor:
             subspan_name = get_attr_str(attrs, "nat.subspan.name")
             event_type = get_attr_str(attrs, "nat.event_type")
             
-            span_id = metadata.get("span_id", "")[:16]
-            parent_span_id = metadata.get("parent_span_id", "")[:16]
+            span_id = (metadata.get("span_id") or "")[:16]
+            parent_span_id = (metadata.get("parent_span_id") or "")[:16]
             
             # Collect agent spans (thought/observation/tool)
             if func_name in NODE_FUNCTION_NAMES:
@@ -888,8 +897,7 @@ class APIExtractor:
                 all_descendants = collect_descendants(cq_span_id, parent_to_children)
                 
                 # Sort by time
-                all_descendants.sort(key=lambda s: safe_float(s.get("start_time", "")))
-                
+                all_descendants.sort(key=lambda s: safe_float(s.get("start_time")))                
                 logger.debug("Question %d: Collected %d descendant spans", i, len(all_descendants))
                 
                 # Build tool_calls for backward compatibility
@@ -948,7 +956,7 @@ class APIExtractor:
         current_thought = ""
         current_reason = ""
         step_id = 1
-        
+        obs_index = APIExtractor._build_observation_index(spans)
         for idx, span in enumerate(spans):
             func_name = span["function_name"]
             span_kind = span.get("span_kind", "FUNCTION")
@@ -983,8 +991,8 @@ class APIExtractor:
                             if isinstance(parsed, dict):
                                 current_thought = parsed.get("thought", output_value)
                                 current_reason = parsed.get("actions") or {}.get("reason", "")
-                        except:
-                            pass
+                        except (ValueError, SyntaxError) as e:
+                            logger.debug("Failed to parse thought node with ast.literal_eval: %s", e)
             
             elif span_kind == "TOOL":
                 # Tool call span

@@ -17,6 +17,7 @@ Base LLM Judge for evaluation metrics.
 
 Supports Fireworks API, DeepEval, and various LLM providers.
 """
+import asyncio
 import httpx
 import json
 import os
@@ -32,14 +33,8 @@ from openai import APIError, APIConnectionError, RateLimitError, AuthenticationE
 from pydantic import BaseModel
 from pydantic import Field
 
-# Logger with compatibility for both old and new structure
-try:
-    from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__)
-except ImportError:
-    # Fallback to vuln_analysis logger
-    from vuln_analysis.logging.loggers_factory import LoggingFactory
-    logger = LoggingFactory.get_agent_logger(__name__)
+from evaluation.utils.logger import get_logger
+logger = get_logger(__name__)
 
 
 class JudgeConfig(BaseModel):
@@ -50,13 +45,14 @@ class JudgeConfig(BaseModel):
     """
     model_name: str = Field(
         # default="nvidia/nemotron-3-nano",
-        default="google/gemma-4-26B-A4B-it",
+        default="hugging-quants/Meta-Llama-3.1-70B-Instruct-AWQ-INT4",
         description="Model name/path for the judge LLM")
     api_key: Optional[str] = Field(default=None, description="API key (defaults to NGC_API_KEY env var)")
-    base_url: str = Field(default="https://inference-gateway-agentgateway-system.apps.appeng-lab01.accl-001.lab.rdu2.dc.redhat.com/v1", description="API base URL (NVIDIA NIM)")
+    base_url: str = Field(default="http://llama3-1-70b-instruct-4bit-exploit-iq-models.apps.appeng-lab01.accl-001.lab.rdu2.dc.redhat.com/v1", description="API base URL (NVIDIA NIM)")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="Temperature for generation")
     max_tokens: int = Field(default=2048, gt=0, description="Maximum tokens for generation")
-
+    verify_ssl: bool = Field(default=False, description="Whether to verify SSL certificates")
+    
     class Config:
         """Pydantic configuration."""
         extra = "allow"
@@ -84,6 +80,18 @@ class FireworksJudge(DeepEvalBaseLLM):
         Raises:
             ValueError: If API key is not provided
         """
+        self.api_call_times = []
+        self.total_api_calls = 0
+        self.last_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+        self.cumulative_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
         self.config = config or JudgeConfig()
         api_key = self.config.api_key or os.environ.get("NGC_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
 
@@ -92,13 +100,39 @@ class FireworksJudge(DeepEvalBaseLLM):
             raise ValueError("NGC_API_KEY environment variable must be set")
 
         try:
-            http_client = httpx.Client(verify=False)
-            self.client = OpenAI(api_key=api_key, base_url=self.config.base_url, http_client=http_client, timeout=20.0)
+            self._http_client = httpx.Client(verify=self.config.verify_ssl)
+            self.client = OpenAI(api_key=api_key, base_url=self.config.base_url, http_client=self._http_client, timeout=20.0)
             logger.debug(f"Initialized Judge with model: {self.config.model_name} at {self.config.base_url}")
         except Exception as e:
             logger.error("Failed to initialize OpenAI client: %s", str(e))
             raise
+        
+        self.reset_usage_tracking()
+    
+    def reset_usage_tracking(self):
+        """Reset usage counters (call at start of each evaluation batch)."""
+        self.last_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+        self.cumulative_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+    
+    def get_cumulative_usage(self) -> dict:
+        """Get and reset cumulative usage."""
+        usage = self.cumulative_usage.copy()
+        self.reset_usage_tracking()
+        return usage
 
+    def __del__(self):
+        """Cleanup resources."""
+        if hasattr(self, '_http_client'):
+            self._http_client.close()
+    
     def load_model(self):
         """Return the OpenAI client."""
         return self.client
@@ -119,6 +153,8 @@ class FireworksJudge(DeepEvalBaseLLM):
             APIConnectionError: If connection to API fails
             APIError: For other API errors
         """
+        import time
+        call_start = time.time()
         logger.debug(f"Generating response (prompt length: {len(prompt)})")
         
         try:
@@ -132,6 +168,25 @@ class FireworksJudge(DeepEvalBaseLLM):
                 timeout=120.0
             )
             content = response.choices[0].message.content
+            call_duration = time.time() - call_start
+            self.api_call_times.append(call_duration)
+            self.total_api_calls += 1
+            if hasattr(response, 'usage') and response.usage:
+                self.last_usage = {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+                
+                self.cumulative_usage["prompt_tokens"] += response.usage.prompt_tokens
+                self.cumulative_usage["completion_tokens"] += response.usage.completion_tokens
+                self.cumulative_usage["total_tokens"] += response.usage.total_tokens
+                
+                logger.info("Token usage - Prompt: %d, Completion: %d, Total: %d",
+                        response.usage.prompt_tokens,
+                        response.usage.completion_tokens,
+                        response.usage.total_tokens)
+
 
             logger.debug("=" * 80)
             logger.debug("RAW MODEL OUTPUT (first 1000 chars):")
@@ -193,7 +248,10 @@ class FireworksJudge(DeepEvalBaseLLM):
                     raise ValueError(f"Model returned invalid JSON: {str(e)}")
 
             return content or ""
-            
+        except ValueError as e:
+            # JSON validation failed - the API call succeeded, but response was not valid JSON
+            logger.error("JSON validation failed for model response: %s", str(e))
+            raise
         except AuthenticationError as e:
             logger.error("NGC API authentication failed - check NGC_API_KEY: %s", str(e))
             raise
@@ -216,8 +274,21 @@ class FireworksJudge(DeepEvalBaseLLM):
             logger.error("NGC API error - may be temporary: %s", str(e))
             raise
         except Exception as e:
+            call_duration = time.time() - call_start
+            logger.error(f"Unexpected error after {call_duration:.2f}s: {e}")
             logger.error("Unexpected error during LLM generation: %s", str(e), exc_info=True)
             raise
+
+    def get_performance_stats(self):
+        if not self.api_call_times:
+            return {}
+        return {
+            "total_calls": self.total_api_calls,
+            "total_time_seconds": round(sum(self.api_call_times), 2),
+            "average_latency_seconds": round(sum(self.api_call_times) / len(self.api_call_times), 2),
+            "min_latency_seconds": round(min(self.api_call_times), 2),
+            "max_latency_seconds": round(max(self.api_call_times), 2)
+        }
     
     def health_check(self) -> bool:
         """
@@ -256,7 +327,7 @@ class FireworksJudge(DeepEvalBaseLLM):
         Returns:
             Generated text response
         """
-        return self.generate(prompt)
+        return await asyncio.to_thread(self.generate, prompt)
 
     def get_model_name(self) -> str:
         """Return the model name."""
@@ -288,7 +359,7 @@ class DirectJudge:
             raise ValueError("NGC_API_KEY environment variable must be set")
 
         try:
-            http_client = httpx.Client(verify=False)
+            http_client = httpx.Client(verify=self.config.verify_ssl)
             self.client = OpenAI(
                 api_key=api_key, 
                 base_url=self.config.base_url,

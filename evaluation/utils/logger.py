@@ -33,7 +33,7 @@ def get_logger(name: str, level: Optional[str] = None) -> logging.Logger:
             file_handler = logging.FileHandler(log_file)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
-            print(f"Logging to: {log_file}")
+            logger.info("Logging to: %s", log_file)
 
     # Set level
     log_level = level or 'INFO'

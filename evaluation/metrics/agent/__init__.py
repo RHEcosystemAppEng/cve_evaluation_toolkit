@@ -36,7 +36,8 @@ from evaluation.metrics.agent.investigation_metrics import (
     InvestigationEvalInput,
     InvestigationMetricSuite,
     TOOL_DESCRIPTIONS,
-    create_answer_quality_metric,  # create_reasoning_quality_metric,
+    create_answer_quality_metric,  
+    create_reasoning_quality_metric,
     create_tool_selection_quality_metric,
 )
 

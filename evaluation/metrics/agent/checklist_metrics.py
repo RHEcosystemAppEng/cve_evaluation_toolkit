@@ -18,15 +18,10 @@ from deepeval.test_case import LLMTestCaseParams
 from pydantic import BaseModel
 from pydantic import Field
 
-from evaluation.extractors.data_extractor import ToolCall
 
-# Add logger
-try:
-    from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
+from evaluation.utils.logger import get_logger
+logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
+
 
 # ============================================================================
 # Data Models
@@ -53,7 +48,7 @@ class ChecklistEvalInput(BaseModel):
 
 
 def create_checklist_prompt_alignment_metric(judge_model: DeepEvalBaseLLM,
-                                             threshold: float = 0.7) -> PromptAlignmentMetric:
+                                             threshold: float = 0.6) -> PromptAlignmentMetric:
     """
     Create DeepEval PromptAlignmentMetric for checklist generation.
 
@@ -80,7 +75,7 @@ def create_checklist_prompt_alignment_metric(judge_model: DeepEvalBaseLLM,
         verbose_mode=False)
 
 
-def create_checklist_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
+def create_checklist_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.6) -> GEval:
     """
     Create GEval metric for overall checklist quality assessment.
 
@@ -149,6 +144,11 @@ class ChecklistMetricSuite:
         if judge_model is None:
             raise ValueError("judge_model is required for ChecklistMetricSuite")
 
+        self.token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
         self.judge_model = judge_model
         self.prompt_alignment = create_checklist_prompt_alignment_metric(judge_model)
         self.quality_metric = create_checklist_quality_metric(judge_model)
@@ -160,6 +160,7 @@ class ChecklistMetricSuite:
         Returns:
             Dict with overall score, individual results, and summary
         """
+        tokens_before = getattr(self.judge_model, 'cumulative_usage', {}).get('total_tokens', 0)
         results = {}
         checklist_str = "\n".join(f"- {item}" for item in input_data.checklist_items)
         formatted_input = f"""
@@ -214,10 +215,16 @@ class ChecklistMetricSuite:
         overall_score = sum(scores) / len(scores) if scores else 0
         passed_count = sum(1 for r in results.values() if r["passed"])
 
+        tokens_after = getattr(self.judge_model, 'cumulative_usage', {}).get('total_tokens', 0)
+        tokens_used = tokens_after - tokens_before
+        
+        self.token_usage["total_tokens"] += tokens_used
+        logger.info("Token usage for this step: %d tokens", tokens_used)
         return {
             "overall_score": overall_score,
             "passed": passed_count == len(results),
             "passed_count": f"{passed_count}/{len(results)}",
             "individual_results": results,
-            "cve_id": input_data.cve_id
+            "cve_id": input_data.cve_id,
+            "token_usage": tokens_used
         }

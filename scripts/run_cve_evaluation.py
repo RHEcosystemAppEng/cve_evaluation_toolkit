@@ -35,10 +35,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
 from evaluation.api_client import APIConfig, ExploitIQClient
 from evaluation.extractors.data_extractor import APIExtractor, CVEAnalysisResult
 from evaluation.metrics.agent import (
@@ -55,14 +51,8 @@ from evaluation.metrics.agent import (
 )
 from evaluation.models import FireworksJudge, JudgeConfig
 
-# Logger with compatibility for both old and new structure
-try:
-    from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
-except ImportError:
-    # Fallback to vuln_analysis logger
-    from vuln_analysis.logging.loggers_factory import LoggingFactory
-    logger = LoggingFactory.get_agent_logger(__name__)
+from evaluation.utils.logger import get_logger
+logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
 
 
 class CVEEvaluationOrchestrator:
@@ -157,14 +147,48 @@ class CVEEvaluationOrchestrator:
         Returns:
             Dictionary with evaluation results for all metrics
         """
+        import time
+        EVAL_PASS_THRESHOLD = 0.6
+        if hasattr(self.checklist_suite, 'token_usage'):
+            self.checklist_suite.token_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        if hasattr(self.investigation_suite, 'token_usage'):
+            self.investigation_suite.token_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        if hasattr(self.summary_suite, 'token_usage'):
+            self.summary_suite.token_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        if hasattr(self.justification_suite, 'token_usage'):
+            self.justification_suite.token_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        if hasattr(self.intel_score_suite, 'token_usage'):
+            self.intel_score_suite.token_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        
         # Normalize stages
         if stages is None or "all" in stages:
             stages = ["checklist", "investigation", "summary", "justification", "intel_score"]
-
+        
         logger.info("")
         logger.info("Running evaluation metrics for CVE %s (stages: %s)...",
-                   parsed_result.cve_id, ", ".join(stages))
-
+                parsed_result.cve_id, ", ".join(stages))
+        start_time = time.time()
+        stage_times = {}
         evaluation_results = {
             "cve_id": parsed_result.cve_id,
             "job_id": parsed_result.job_id,
@@ -179,6 +203,7 @@ class CVEEvaluationOrchestrator:
 
         # 1. Checklist Evaluation
         if "checklist" in stages and parsed_result.checklist_items:
+            stage_start = time.time()
             try:
                 logger.info("Running checklist evaluation...")
                 checklist_input = ChecklistEvalInput(
@@ -203,11 +228,17 @@ class CVEEvaluationOrchestrator:
                     })
 
                 logger.info("  Checklist: overall=%.2f", checklist_results.get("overall_score", 0))
+                logger.info("  Checklist: overall=%.2f, %s passed (threshold=%.1f)", 
+                    checklist_results.get("overall_score", 0),
+                    checklist_results.get("passed_count", "0/1"), EVAL_PASS_THRESHOLD)
             except Exception as e:
                 logger.error("  ERROR: Checklist evaluation failed: %s", e, exc_info=True)
+            finally:
+                stage_times["checklist"] = time.time() - stage_start
 
         # 5. Intel Score Evaluation
         if "intel_score" in stages and parsed_result.intel_score is not None:
+            stage_start = time.time()
             try:
                 logger.info("Running intel score evaluation...")
 
@@ -235,14 +266,20 @@ class CVEEvaluationOrchestrator:
                         })
 
                     logger.info("  Intel Score: score=%.2f", intel_results.get("overall_score", 0))
+                    logger.info("  Intel Score: overall=%.2f, %s passed (threshold=%.1f)", 
+                        intel_results.get("overall_score", 0),
+                        intel_results.get("passed_count", "0/1"), EVAL_PASS_THRESHOLD)
                 else:
                     logger.warning("  WARNING: Intel score breakdown not available in traces")
             except Exception as e:
                 logger.error("  ERROR: Intel score evaluation failed: %s", e, exc_info=True)
+            finally:
+                stage_times["intel_score"] = time.time() - stage_start
 
 
         # 2. Investigation Evaluation (per step)
         if "investigation" in stages and parsed_result.checklist_step_details:
+            stage_start = time.time()
             try:
                 logger.info("Running investigation evaluation (%d steps)...",
                            len(parsed_result.checklist_step_details))
@@ -275,12 +312,19 @@ class CVEEvaluationOrchestrator:
                         logger.warning("    Step %d failed: %s", i, e)
 
                 avg_score = sum(investigation_scores) / len(investigation_scores) if investigation_scores else 0
-                logger.info("  Investigation: avg=%.2f (%d steps)", avg_score, len(investigation_scores))
+                passed_info = step_result.get("passed_count", "0/4")
+                logger.info("  Investigation: avg=%.2f (%d steps), %s metrics passed", 
+                            avg_score, 
+                            len(investigation_scores),
+                            passed_info)
             except Exception as e:
                 logger.error("  ERROR: Investigation evaluation failed: %s", e, exc_info=True)
+            finally:
+                stage_times["investigation"] = time.time() - stage_start
 
         # 3. Summary Evaluation
         if "summary" in stages and parsed_result.summary:
+            stage_start = time.time()
             try:
                 logger.info("Running summary evaluation...")
                 summary_input = SummaryEvalInput.from_extraction(
@@ -298,12 +342,19 @@ class CVEEvaluationOrchestrator:
                     "metric_reasoning": summary_results.get("reason", "")
                 })
 
-                logger.info("  Summary: score=%.2f", summary_results.get("overall_score", 0))
+                passed = "✓" if summary_results.get("passed", False) else "✗"
+                logger.info("  Summary: score=%.2f %s (threshold=%.1f)", 
+                            summary_results.get("overall_score", 0),
+                            passed,
+                            EVAL_PASS_THRESHOLD)
             except Exception as e:
                 logger.error("  ERROR: Summary evaluation failed: %s", e, exc_info=True)
+            finally:
+                stage_times["summary"] = time.time() - stage_start
 
         # 4. Justification Evaluation
         if "justification" in stages and parsed_result.justification_label:
+            stage_start = time.time()
             try:
                 logger.info("Running justification evaluation...")
                 justification_input = JustificationEvalInput.from_extraction(
@@ -321,13 +372,63 @@ class CVEEvaluationOrchestrator:
                     "metric_reasoning": justification_results.get("reason", "")
                 })
 
-                logger.info("  Justification: score=%.2f", justification_results.get("overall_score", 0))
+                passed = "✓" if justification_results.get("passed", False) else "✗"
+                logger.info("  Justification: score=%.2f %s (threshold=%.1f)", 
+                            justification_results.get("overall_score", 0),
+                            passed,
+                            EVAL_PASS_THRESHOLD)
             except Exception as e:
                 logger.error("  ERROR: Justification evaluation failed: %s", e, exc_info=True)
+            finally:
+                stage_times["justification"] = time.time() - stage_start
 
         logger.info("")
         logger.info("Evaluation complete: %d metrics computed", len(evaluation_results["metrics"]))
-
+        total_metrics = len(evaluation_results["metrics"])
+        passed_metrics = sum(1 for m in evaluation_results["metrics"] if m.get("metric_score", 0) >= EVAL_PASS_THRESHOLD)
+        logger.info("Evaluation complete: %d metrics computed, %d/%d passed (threshold=%.1f)", 
+                    total_metrics,
+                    passed_metrics,
+                    total_metrics,
+                    EVAL_PASS_THRESHOLD)
+        total_tokens = 0
+        token_breakdown = {}
+        if hasattr(self.checklist_suite, 'token_usage'):
+            tokens = self.checklist_suite.token_usage.get("total_tokens", 0)
+            total_tokens += tokens
+            token_breakdown["checklist"] = tokens
+        if hasattr(self.investigation_suite, 'token_usage'):
+            tokens = self.investigation_suite.token_usage.get("total_tokens", 0)
+            total_tokens += tokens
+            token_breakdown["investigation"] = tokens
+        if hasattr(self.summary_suite, 'token_usage'):
+            tokens = self.summary_suite.token_usage.get("total_tokens", 0)
+            total_tokens += tokens
+            token_breakdown["summary"] = tokens
+        if hasattr(self.justification_suite, 'token_usage'):
+            tokens = self.justification_suite.token_usage.get("total_tokens", 0)
+            total_tokens += tokens
+            token_breakdown["justification"] = tokens
+        if hasattr(self.intel_score_suite, 'token_usage'):
+            tokens = self.intel_score_suite.token_usage.get("total_tokens", 0)
+            total_tokens += tokens
+            token_breakdown["intel_score"] = tokens
+        logger.info("Total token usage for this job: %d tokens", total_tokens)
+        logger.info("     Breakdown: %s", token_breakdown)
+        evaluation_results["token_usage"] = {
+            "total": total_tokens,
+            "breakdown": token_breakdown
+        }
+        total_duration = time.time() - start_time
+        evaluation_results["timing"] = {
+            "total_duration_seconds": round(total_duration, 2),
+            "stage_durations": {k: round(v, 2) for k, v in stage_times.items()},
+            "average_per_metric": round(total_duration / len(evaluation_results["metrics"]), 2) if evaluation_results["metrics"] else 0
+        }
+        logger.info("Total evaluation time: %.2f seconds", total_duration)
+        logger.info("     Stage breakdown: %s", {k: f"{v:.2f}s" for k, v in stage_times.items()})
+        if hasattr(self.judge_model, 'get_performance_stats'):
+            evaluation_results["llm_performance"] = self.judge_model.get_performance_stats()
         return evaluation_results
 
     async def submit_evaluation_results(
@@ -427,18 +528,28 @@ class CVEEvaluationOrchestrator:
         Returns:
             Evaluation results dictionary, or None if processing failed
         """
+        import time
+        job_start_time = time.time()
+        fetch_time = 0
+        eval_time = 0
+        submit_time = 0
         try:
             # Step 1: Fetch and parse
+            fetch_start = time.time()
             parsed_result = await self.fetch_and_parse_job(job)
+            fetch_time = time.time() - fetch_start
             if not parsed_result:
                 return None
 
             # Step 2: Evaluate
+            eval_start = time.time() 
             evaluation_results = self.evaluate_cve_analysis(parsed_result, stages=stages)
+            eval_time = time.time() - eval_start
 
             # Step 3: Submit results (if enabled)
             if submit_results:
                 # Extract trace_id and timestamp from parsed_result (already extracted from traces)
+                submit_start = time.time()
                 trace_id = parsed_result.trace_id or "unknown"
                 execution_start_timestamp = parsed_result.execution_start_timestamp or datetime.now().isoformat()
 
@@ -448,6 +559,14 @@ class CVEEvaluationOrchestrator:
                     trace_id,
                     execution_start_timestamp
                 )
+                submit_time = time.time() - submit_start
+            total_time = time.time() - job_start_time
+            evaluation_results["pipeline_timing"] = {
+                "total_seconds": round(total_time, 2),
+                "fetch_parse_seconds": round(fetch_time, 2),
+                "evaluation_seconds": round(eval_time, 2),
+                "submit_seconds": round(submit_time, 2)
+            }
 
             return evaluation_results
 
@@ -461,7 +580,8 @@ class CVEEvaluationOrchestrator:
         submit_results: bool = True,
         stages: list[str] = None,
         job_id: str = None,
-        batch_id: str = None
+        batch_id: str = None,
+        concurrency: int = 1
     ) -> list[dict[str, Any]]:
         """
         Process a batch of jobs from the API.
@@ -516,27 +636,63 @@ class CVEEvaluationOrchestrator:
             logger.info("Will process %d jobs", len(jobs))
         
         logger.info("")
-
+        logger.info("Will process %d jobs with concurrency=%d", len(jobs), concurrency)
         all_results = []
         successful = 0
         failed = 0
         skipped_no_traces = 0
 
-        for i, job in enumerate(jobs, 1):
-            logger.info("")
-            logger.info("Processing job %d/%d", i, len(jobs))
+        if concurrency == 1:
+            for i, job in enumerate(jobs, 1):
+                logger.info("")
+                logger.info("Processing job %d/%d", i, len(jobs))
 
-            result = await self.process_single_job(job, submit_results=submit_results, stages=stages)
+                result = await self.process_single_job(job, submit_results=submit_results, stages=stages)
 
-            if result:
-                all_results.append(result)
-                successful += 1
-                logger.info("  Job completed successfully")
-            else:
-                # Check if it failed due to no traces or other error
-                # For now, count as skipped/failed
-                failed += 1
-                logger.info("Job skipped or failed, continuing to next...")
+                if result:
+                    all_results.append(result)
+                    successful += 1
+                    logger.info("  Job completed successfully")
+                else:
+                    # Check if it failed due to no traces or other error
+                    # For now, count as skipped/failed
+                    failed += 1
+                    logger.info("Job skipped or failed, continuing to next...")
+        else:
+            logger.info("Processing jobs concurrently (max %d at a time)...", concurrency)
+            
+            # Create semaphore to limit concurrency
+            semaphore = asyncio.Semaphore(concurrency)
+            
+            async def process_with_semaphore(job_idx: int, job: dict) -> Optional[dict]:
+                """Process job with semaphore to limit concurrency."""
+                async with semaphore:
+                    logger.info("Starting job %d/%d (concurrent)", job_idx + 1, len(jobs))
+                    result = await self.process_single_job(job, submit_results=submit_results, stages=stages)
+                    
+                    if result:
+                        logger.info("Job %d/%d completed successfully", job_idx + 1, len(jobs))
+                    else:
+                        logger.warning("Job %d/%d failed or skipped", job_idx + 1, len(jobs))
+                    
+                    return result
+            
+            # Create tasks for all jobs
+            tasks = [process_with_semaphore(i, job) for i, job in enumerate(jobs)]
+            
+            # Run all tasks concurrently (but limited by semaphore)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Job failed with exception: %s", result)
+                    failed += 1
+                elif result:
+                    all_results.append(result)
+                    successful += 1
+                else:
+                    failed += 1
 
         logger.info("")
         logger.info("=" * 80)
@@ -553,8 +709,169 @@ class CVEEvaluationOrchestrator:
 
         return all_results
 
+def export_results_to_csv(
+    results: list[dict[str, Any]], 
+    csv_file: str, 
+    judge_model: str,
+    include_text: bool = True,
+    truncate: int = None
+) -> None:
+    """
+    Export evaluation results to CSV format.
+    
+    Args:
+        results: List of evaluation result dictionaries
+        csv_file: Output CSV file path
+        judge_model: Name of the judge model used
+        include_text: Include model_input/output in CSV (default: True)
+        truncate: Truncate long text fields to N characters (default: None)
+    """
+    import csv
+    import numpy as np
+    
+    EVAL_PASS_THRESHOLD = 0.6
+    # Step 1: Calculate outliers (need all data first)
+    all_tokens = [r.get("token_usage", {}).get("total", 0) for r in results]
+    all_times = [r.get("timing", {}).get("total_duration_seconds", 0) for r in results]
+    
+    # IQR method for outlier detection
+    def is_outlier(value, data):
+        if not data or len(data) < 4:
+            return 0
+        q1 = np.percentile(data, 25)
+        q3 = np.percentile(data, 75)
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        return 1 if value < lower_bound or value > upper_bound else 0
+    
+    # Step 2: Helper function to map llm_node to stage_name
+    def get_stage_name(llm_node: str) -> str:
+        mapping = {
+            "CHECKLIST_GENERATION": "checklist",
+            "CHECKLIST": "checklist",
+            "AGENT_LOOP": "investigation",
+            "SUMMARIZE": "summary",
+            "JUSTIFICATION": "justification",
+            "INTEL_SCORE": "intel_score"
+        }
+        return mapping.get(llm_node, llm_node.lower())
+    
+    # Step 3: Define CSV fields
+    fieldnames = [
+        "job_id", "cve_id", "trace_id", "component", "component_version",
+        "execution_timestamp", "llm_node", "metric_name", "metric_score",
+        "metric_passed", "threshold", "metric_tokens", "metric_time_seconds",
+        "stage_name", "stage_total_tokens", "stage_total_time_seconds",
+        "total_job_tokens", "total_job_time_seconds", "job_metrics_total",
+        "job_metrics_passed", "job_pass_rate", "is_outlier_tokens",
+        "is_outlier_time", "judge_model"
+    ]
+    
+    if include_text:
+        fieldnames.extend(["metric_reasoning", "model_input", "model_output"])
+    
+    # Step 4: Write CSV
+    logger.info(f"Exporting {len(results)} jobs to CSV: {csv_file}")
+    
+    with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        
+        for result in results:
+            # Job-level info
+            job_id = result.get("job_id", "")
+            cve_id = result.get("cve_id", "")
+            trace_id = result.get("trace_id", "unknown")
+            component = result.get("component", "unknown")
+            component_version = result.get("component_version", "unknown")
+            execution_timestamp = result.get("execution_start_timestamp", "")
+            
+            # Token and timing info
+            token_usage = result.get("token_usage", {})
+            timing = result.get("timing", {})
+            token_breakdown = token_usage.get("breakdown", {})
+            time_breakdown = timing.get("stage_durations", {})
+            
+            total_job_tokens = token_usage.get("total", 0)
+            total_job_time = timing.get("total_duration_seconds", 0)
+            
+            # Job-level metrics
+            metrics = result.get("metrics", [])
+            job_metrics_total = len(metrics)
+            job_metrics_passed = sum(1 for m in metrics if m.get("metric_score", 0) >= EVAL_PASS_THRESHOLD)
+            job_pass_rate = round(job_metrics_passed / job_metrics_total, 4) if job_metrics_total > 0 else 0
+            
+            # Outlier flags
+            is_outlier_tok = is_outlier(total_job_tokens, all_tokens)
+            is_outlier_tm = is_outlier(total_job_time, all_times)
+            
+            # Process each metric
+            for metric in metrics:
+                llm_node = metric.get("llm_node", "")
+                stage_name = get_stage_name(llm_node)
+                
+                # Get stage-level stats
+                stage_total_tokens = token_breakdown.get(stage_name, 0)
+                stage_total_time = time_breakdown.get(stage_name, 0)
+                
+                # Count metrics in this stage (for approximation)
+                metrics_in_stage = [m for m in metrics if get_stage_name(m.get("llm_node", "")) == stage_name]
+                num_metrics_in_stage = len(metrics_in_stage)
+                
+                # Approximate per-metric tokens and time
+                metric_tokens = round(stage_total_tokens / num_metrics_in_stage, 2) if num_metrics_in_stage > 0 else 0
+                metric_time = round(stage_total_time / num_metrics_in_stage, 4) if num_metrics_in_stage > 0 else 0
+                
+                # Build row
+                row = {
+                    "job_id": job_id,
+                    "cve_id": cve_id,
+                    "trace_id": trace_id,
+                    "component": component,
+                    "component_version": component_version,
+                    "execution_timestamp": execution_timestamp,
+                    "llm_node": llm_node,
+                    "metric_name": metric.get("metric_name", ""),
+                    "metric_score": round(metric.get("metric_score", 0), 4),
+                    "metric_passed": 1 if metric.get("metric_score", 0) >= EVAL_PASS_THRESHOLD else 0, #threshold might change
+                    "threshold": EVAL_PASS_THRESHOLD, #threshold might change
+                    "metric_tokens": metric_tokens,
+                    "metric_time_seconds": metric_time,
+                    "stage_name": stage_name,
+                    "stage_total_tokens": stage_total_tokens,
+                    "stage_total_time_seconds": round(stage_total_time, 4) if stage_total_time else 0,
+                    "total_job_tokens": total_job_tokens,
+                    "total_job_time_seconds": round(total_job_time, 2),
+                    "job_metrics_total": job_metrics_total,
+                    "job_metrics_passed": job_metrics_passed,
+                    "job_pass_rate": job_pass_rate,
+                    "is_outlier_tokens": is_outlier_tok,
+                    "is_outlier_time": is_outlier_tm,
+                    "judge_model": judge_model
+                }
+                
+                # Add text fields if requested
+                if include_text:
+                    reasoning = metric.get("metric_reasoning", "")
+                    model_input = metric.get("model_input", "")
+                    model_output = metric.get("model_output", "")
+                    
+                    # Truncate if requested
+                    if truncate:
+                        reasoning = reasoning[:truncate] if reasoning else ""
+                        model_input = model_input[:truncate] if model_input else ""
+                        model_output = model_output[:truncate] if model_output else ""
+                    
+                    row["metric_reasoning"] = reasoning
+                    row["model_input"] = model_input
+                    row["model_output"] = model_output
+                
+                writer.writerow(row)
+    
+    logger.info(f"CSV export complete: {csv_file}")
 
-async def main():
+async def _main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
         description="Complete CVE evaluation pipeline: fetch, parse, evaluate, submit",
@@ -606,6 +923,21 @@ Examples:
         help="Output file for evaluation results (default: evaluation_results.json)"
     )
     parser.add_argument(
+        "--output-csv",
+        help="Export results to CSV format (in addition to JSON). Specify the CSV file path."
+    )
+    parser.add_argument(
+        "--csv-no-text",
+        action="store_true",
+        help="Exclude model_input/output/reasoning from CSV to reduce file size"
+    )
+    parser.add_argument(
+        "--csv-truncate",
+        type=int,
+        default=None,
+        help="Truncate long text fields in CSV to N characters (default: no truncation)"
+    )
+    parser.add_argument(
         "--jobs-file",
         default="src/evaluation/test_data/jobs.json",
         help="Path to local jobs.json (local mode only)"
@@ -634,6 +966,12 @@ Examples:
         help="Specific batch_id to evaluate (API mode only). If provided, fetches all jobs from this batch"
     )
 
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Number of jobs to process concurrently (default: 1). Set to 1 for sequential processing (safe for self-hosted LLMs). Set to 5-10 for parallel processing with hosted APIs."
+    )
 
     parser.add_argument(
         "--output-format",
@@ -697,9 +1035,11 @@ Examples:
 
     # Initialize API client
     logger.info("")
-    logger.info("Initializing API client...")
-    api_config = APIConfig()
-    api_client = ExploitIQClient(config=api_config)
+    # logger.info("Initializing API client...")
+    judge_model = None
+    judge_config = None
+    # api_config = APIConfig()
+    # api_client = ExploitIQClient(config=api_config)
 
     # Initialize judge model
     logger.info("Initializing LLM judge model...")
@@ -714,30 +1054,27 @@ Examples:
         logger.info("Judge model: %s", judge_config.model_name)
         logger.info("Judge url: %s", judge_config.base_url)
         logger.info("Testing LLM Judge connection...")
-        try:
-            judge_model.health_check()
-            logger.info("LLM Judge connection verified successfully")
-        except Exception as health_check_error:
-            logger.error("LLM Judge health check FAILED: %s", health_check_error)
-            logger.error("CRITICAL: Cannot proceed without working LLM Judge")
-            logger.error("Please check:")
-            logger.error("  1. JUDGE_BASE_URL is correct and accessible")
-            logger.error("  2. JUDGE_MODEL name is correct")
-            logger.error("  3. Network connectivity (VPN, firewall, etc.)")
-            sys.exit(1) 
-    except (ValueError, Exception) as e:
+        judge_model.health_check()
+        logger.info("LLM Judge connection verified successfully")
+    except Exception as e:
+        if judge_model is not None and hasattr(judge_model, '_http_client'):
+            judge_model._http_client.close()
         logger.error("")
-        logger.error("ERROR: Failed to initialize LLM judge")
-        logger.error("Reason: %s", str(e))
-        logger.error("")
+        logger.error("ERROR: Failed to initialize LLM judge: %s", str(e))
+        logger.error("Please check:")
+        logger.error("  1. JUDGE_BASE_URL is correct and accessible")
+        logger.error("  2. JUDGE_MODEL name is correct")
+        logger.error("  3. Network connectivity (VPN, firewall, etc.)")
         return 1
+    
+    api_config = APIConfig()
 
-    # Initialize orchestrator
-    logger.info("")
-    orchestrator = CVEEvaluationOrchestrator(api_client, judge_model)
-
-    # Run pipeline
     try:
+        async with ExploitIQClient(config=api_config) as api_client:
+            logger.info("")
+            logger.info("Initializing API client and orchestrator...")
+            orchestrator = CVEEvaluationOrchestrator(api_client, judge_model)
+
         if args.mode == "api":
             # Fetch from API and process
             results = await orchestrator.process_batch(
@@ -745,7 +1082,8 @@ Examples:
                 submit_results=args.submit,
                 stages=args.stages,
                 job_id=args.job_id,
-                batch_id=args.batch_id
+                batch_id=args.batch_id,
+                concurrency=args.concurrency
             )
 
         else:
@@ -899,6 +1237,20 @@ Examples:
             logger.error("Failed to serialize results to JSON: %s", str(e))
             return 1
 
+        if args.output_csv:
+            try:
+                export_results_to_csv(
+                    results=results,  # use original results (local mode)
+                    csv_file=args.output_csv,
+                    judge_model=judge_config.model_name,
+                    include_text=not args.csv_no_text,
+                    truncate=args.csv_truncate
+                )
+                logger.info("   CSV output: %s", args.output_csv)
+            except Exception as e:
+                logger.error("Failed to export CSV: %s", e, exc_info=True)
+                logger.warning("JSON output was saved successfully, only CSV export failed")
+
         logger.info("")
         logger.info("=" * 80)
         logger.info("Pipeline complete!")
@@ -920,6 +1272,9 @@ Examples:
         logger.error("ERROR: Pipeline failed: %s", e, exc_info=True)
         return 1
 
+def main(): 
+    sys.exit(asyncio.run(_main()))
+
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    main()

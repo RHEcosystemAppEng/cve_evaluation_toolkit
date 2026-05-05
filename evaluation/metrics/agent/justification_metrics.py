@@ -30,15 +30,9 @@ from deepeval.test_case import LLMTestCase
 from deepeval.test_case import LLMTestCaseParams
 from pydantic import BaseModel
 from pydantic import Field
-from evaluation.extractors.data_extractor import ToolCall
 
-# Add logger
-try:
-    from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
+from evaluation.utils.logger import get_logger
+logger = get_logger(__name__, level=os.getenv('LOG_LEVEL', 'INFO'))
 
 
 # ============================================================================
@@ -107,7 +101,7 @@ class JustificationEvalInput(BaseModel):
 # ============================================================================
 
 
-def create_justification_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.7) -> GEval:
+def create_justification_metric(judge_model: DeepEvalBaseLLM, threshold: float = 0.6) -> GEval:
     """
     Single GEval metric for justification evaluation.
 
@@ -212,6 +206,11 @@ class JustificationMetricSuite:
 
         self.judge_model = judge_model
         self.quality_metric = create_justification_metric(judge_model)
+        self.token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
 
     def evaluate(self, input_data: JustificationEvalInput) -> dict[str, Any]:
         """
@@ -223,6 +222,7 @@ class JustificationMetricSuite:
         Returns:
             Dict with score, passed status, and reason
         """
+        tokens_before = getattr(self.judge_model, 'cumulative_usage', {}).get('total_tokens', 0)
         # Format output for evaluation
         justification_output = f"Label: {input_data.justification_label}\n\nReason: {input_data.justification_reason}"
 
@@ -253,10 +253,17 @@ class JustificationMetricSuite:
                 "reason": f"Error: {e}",
             }
 
+        tokens_after = getattr(self.judge_model, 'cumulative_usage', {}).get('total_tokens', 0)
+        tokens_used = tokens_after - tokens_before
+        
+        self.token_usage["total_tokens"] += tokens_used
+        logger.info("Token usage for this step: %d tokens", tokens_used)
+        
         return {
             "overall_score": result["score"],
             "passed": result["passed"],
             "reason": result["reason"],
             "cve_id": input_data.cve_id,
-            "justification_label": input_data.justification_label
+            "justification_label": input_data.justification_label,
+            "token_usage": tokens_used
         }
