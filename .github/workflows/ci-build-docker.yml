@@ -4,11 +4,13 @@ on:
   push:
     branches:
       - main
+      - llama_prompt
     tags:
       - 'v*'
   pull_request:
     branches:
       - main
+      - llama_prompt
 
 env:
   REGISTRY: quay.io
