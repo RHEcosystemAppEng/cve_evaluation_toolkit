@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
   - name: report
-    image: quay.io/ecosystem-appeng/cve-evaluation:latest
+    image: quay.io/ecosystem-appeng/cve-evaluation:llama_prompt
     command: ["sleep", "infinity"]
     envFrom:
     - secretRef:

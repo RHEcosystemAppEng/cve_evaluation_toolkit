@@ -34,7 +34,8 @@ ENV PYTHONPATH=/app
 # Create non-root user
 RUN useradd -m -u 1000 evaluator && \
     chown -R evaluator:evaluator /app
-
+ENV DEEPEVAL_TELEMETRY_OPT_OUT=YES
+ENV HOME=/tmp
 USER evaluator
 
 # Health check (optional)
