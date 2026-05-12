@@ -825,14 +825,12 @@ class APIExtractor:
                 })
         
         # Sort by time to ensure order
-        checklist_spans = [s for s in checklist_spans if safe_timestamp(s.get("start_time")) is not None]
-        checklist_spans.sort(key=lambda s: safe_timestamp(s.get("start_time"), 0.0))
+        checklist_spans.sort(key=lambda s: safe_timestamp(s.get("start_time")) or float('inf'))
         
         logger.info("Collected %d checklist_question spans", len(checklist_spans))
         
         # Step 2: Collect all agent spans and build parent index
         parent_to_children = {}
-        
         for trace in traces:
             attrs = trace.get("spanPayload", {}).get("span_payload", {}).get("attributes", {})
             metadata = trace.get("spanPayload", {}).get("span_payload", {}).get("metadata", {})
@@ -843,41 +841,61 @@ class APIExtractor:
             
             span_id = (metadata.get("span_id") or "")[:16]
             parent_span_id = (metadata.get("parent_span_id") or "")[:16]
+
+            if not span_id:
+                continue
+            is_displayable = func_name in NODE_FUNCTION_NAMES or event_type == "TOOL_START"
+            span_data = {
+                "span_id": span_id,
+                "parent_span_id": parent_span_id,
+                "function_name": subspan_name if event_type == "TOOL_START" else func_name,
+                "subspan_name": subspan_name,
+                "span_kind": "TOOL" if event_type == "TOOL_START" else "FUNCTION",
+                "event_type": event_type,
+                "displayable": is_displayable,
+                "input_value": get_attr_str(attrs, "input.value"),
+                "output_value": get_attr_str(attrs, "output.value"),
+                "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+                "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
+                "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
+            }
+            parent_to_children.setdefault(parent_span_id, []).append(span_data)
             
-            # Collect agent spans (thought/observation/tool)
-            if func_name in NODE_FUNCTION_NAMES:
-                span_data = {
-                    "span_id": span_id,
-                    "parent_span_id": parent_span_id,
-                    "function_name": func_name,
-                    "subspan_name": subspan_name,
-                    "span_kind": "FUNCTION",
-                    "event_type": event_type,
-                    "input_value": get_attr_str(attrs, "input.value"),
-                    "output_value": get_attr_str(attrs, "output.value"),
-                    "start_time": get_attr_str(attrs, "nat.event_timestamp"),
-                    "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
-                    "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
-                }
-                parent_to_children.setdefault(parent_span_id, []).append(span_data)
+            # # Collect agent spans (thought/observation/tool)
+            # if func_name in NODE_FUNCTION_NAMES:
+            #     span_data = {
+            #         "span_id": span_id,
+            #         "parent_span_id": parent_span_id,
+            #         "function_name": func_name,
+            #         "subspan_name": subspan_name,
+            #         "span_kind": "FUNCTION",
+            #         "event_type": event_type,
+            #         "input_value": get_attr_str(attrs, "input.value"),
+            #         "output_value": get_attr_str(attrs, "output.value"),
+            #         "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+            #         "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
+            #         "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
+            #     }
+            #     parent_to_children.setdefault(parent_span_id, []).append(span_data)
             
-            elif event_type == "TOOL_START":
-                span_data = {
-                    "span_id": span_id,
-                    "parent_span_id": parent_span_id,
-                    "function_name": subspan_name or func_name,
-                    "subspan_name": subspan_name,
-                    "span_kind": "TOOL",
-                    "event_type": event_type,
-                    "input_value": get_attr_str(attrs, "input.value"),
-                    "output_value": get_attr_str(attrs, "output.value"),
-                    "start_time": get_attr_str(attrs, "nat.event_timestamp"),
-                    "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
-                    "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
-                }
-                parent_to_children.setdefault(parent_span_id, []).append(span_data)
-        
+            # elif event_type == "TOOL_START":
+            #     span_data = {
+            #         "span_id": span_id,
+            #         "parent_span_id": parent_span_id,
+            #         "function_name": subspan_name or func_name,
+            #         "subspan_name": subspan_name,
+            #         "span_kind": "TOOL",
+            #         "event_type": event_type,
+            #         "input_value": get_attr_str(attrs, "input.value"),
+            #         "output_value": get_attr_str(attrs, "output.value"),
+            #         "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+            #         "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
+            #         "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
+            #     }
+            #    parent_to_children.setdefault(parent_span_id, []).append(span_data)
         logger.info("Built parent index with %d unique parents", len(parent_to_children))
+        logger.info("parent_to_children keys (first 10): %s", list(parent_to_children.keys())[:10])
+        logger.info("checklist_spans span_ids: %s", [s['span_id'] for s in checklist_spans])
         
         # Step 3: Match checklist_items to checklist_question spans by order
         investigation_steps = []
@@ -895,7 +913,7 @@ class APIExtractor:
                 
                 # Recursively collect all descendant spans
                 all_descendants = collect_descendants(cq_span_id, parent_to_children)
-                
+                all_descendants = [s for s in all_descendants if s.get("displayable")]
                 # Sort by time
                 all_descendants.sort(key=lambda s: safe_float(s.get("start_time")))                
                 logger.debug("Question %d: Collected %d descendant spans", i, len(all_descendants))
@@ -956,7 +974,6 @@ class APIExtractor:
         current_thought = ""
         current_reason = ""
         step_id = 1
-        obs_index = APIExtractor._build_observation_index(spans)
         for idx, span in enumerate(spans):
             func_name = span["function_name"]
             span_kind = span.get("span_kind", "FUNCTION")
