@@ -99,7 +99,7 @@ export NGC_API_KEY="your-nvidia-api-key"
 
 # Optional: Override default model
 export JUDGE_MODEL="meta/llama-3.1-70b-instruct"
-export JUDGE_BASE_URL="https://integrate.api.nvidia.com/v1"
+export JUDGE_BASE_URL=""
 ```
 
 ## Usage
@@ -275,7 +275,7 @@ export TOKEN=$(oc create token...)
 ```bash
 # Check model name and base URL:
 export JUDGE_MODEL="meta/llama-3.1-70b-instruct"
-export JUDGE_BASE_URL="https://inference-gateway-agentgateway-system.apps.appeng-lab01.accl-001.lab.rdu2.dc.redhat.com/v1"
+export JUDGE_BASE_URL=""
 ```
 
 #### No traces found for job
