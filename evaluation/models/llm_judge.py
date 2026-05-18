@@ -43,12 +43,9 @@ class JudgeConfig(BaseModel):
 
     Follows Pydantic patterns used throughout vuln_analysis.
     """
-    model_name: str = Field(
-        # default="nvidia/nemotron-3-nano",
-        default="hugging-quants/Meta-Llama-3.1-70B-Instruct-AWQ-INT4",
-        description="Model name/path for the judge LLM")
+    model_name: str = Field(default="", description="Model name/path for the judge LLM")
     api_key: Optional[str] = Field(default=None, description="API key (defaults to NGC_API_KEY env var)")
-    base_url: str = Field(default="http://llama3-1-70b-instruct-4bit-exploit-iq-models.apps.appeng-lab01.accl-001.lab.rdu2.dc.redhat.com/v1", description="API base URL (NVIDIA NIM)")
+    base_url: str = Field(default="", description="API base URL for LLM judge (required, set via JUDGE_BASE_URL env var)")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="Temperature for generation")
     max_tokens: int = Field(default=2048, gt=0, description="Maximum tokens for generation")
     verify_ssl: bool = Field(default=False, description="Whether to verify SSL certificates")

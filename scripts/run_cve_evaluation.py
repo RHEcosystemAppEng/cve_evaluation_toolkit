@@ -877,20 +877,20 @@ async def _main():
         description="Complete CVE evaluation pipeline: fetch, parse, evaluate, submit",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # From API with auto-submit
-  export BASE="https://your-api.com"
-  export TOKEN="your-token"
-  python run_cve_evaluation.py --mode api --limit 5
+            Examples:
+            # From API with auto-submit
+            export BASE="https://your-api.com"
+            export TOKEN="your-token"
+            python run_cve_evaluation.py --mode api --limit 5
 
-  # From API without submit (dry-run)
-  python run_cve_evaluation.py --mode api --no-submit --output results.json
+            # From API without submit (dry-run)
+            python run_cve_evaluation.py --mode api --no-submit --output results.json
 
-  # From local files for testing
-  python run_cve_evaluation.py --mode local \\
-      --jobs-file src/evaluation/test_data/jobs.json \\
-      --traces-file api_traces_sample.json \\
-      --no-submit
+            # From local files for testing
+            python run_cve_evaluation.py --mode local \\
+                --jobs-file src/evaluation/test_data/jobs.json \\
+                --traces-file api_traces_sample.json \\
+                --no-submit
         """
     )
 
