@@ -27,15 +27,8 @@ from typing import Optional
 from pydantic import BaseModel
 from pydantic import Field
 
-# Logger with compatibility for both old and new structure
-try:
-    from evaluation.utils.logger import get_logger
-    logger = get_logger(__name__)
-except ImportError:
-    # Fallback to vuln_analysis logger
-    from vuln_analysis.logging.loggers_factory import LoggingFactory
-    logger = LoggingFactory.get_agent_logger(__name__)
-
+from evaluation.utils.logger import get_logger
+logger = get_logger(__name__)
 
 class ChecklistStep(BaseModel):
     """A single checklist step with title and question."""
@@ -711,36 +704,39 @@ class APIExtractor:
                     event_type = attrs.get("nat.event_type", {}).get("stringValue", "")
                     func_name = attrs.get("nat.function.name", {}).get("stringValue", "")
 
-                    # Find FUNCTION_START + cve_fetch_intel
                     if event_type == "FUNCTION_START" and func_name == "cve_fetch_intel":
                         output_val = attrs.get("output.value", {}).get("stringValue", "")
 
-                        if output_val:
+                        if not output_val:
+                            continue
+
+                        try:
+                            output_json = json.loads(output_val)
+                            intel_list = output_json.get("info", {}).get("intel", [])
+                        except json.JSONDecodeError as e:
+                            logger.warning("Failed to parse CVE output JSON: %s", str(e))
+                            continue
+
+                        for intel_item in intel_list:
                             try:
-                                output_json = json.loads(output_val)
-                                # Extract description from info.intel
-                                intel_list = output_json.get("info", {}).get("intel", [])
-                            except json.JSONDecodeError as e:
-                                logger.warning("Failed to parse CVE output JSON: %s", str(e))
+                                if intel_item.get("vuln_id") != cve_id:
+                                    continue
+
+                                rhsa_details = intel_item.get("rhsa", {}).get("details")
+                                rhsa_desc = rhsa_details[0] if isinstance(rhsa_details, list) and rhsa_details else ""
+
+                                desc = (
+                                    intel_item.get("nvd", {}).get("cve_description")
+                                    or intel_item.get("ghsa", {}).get("description")
+                                    or rhsa_desc
+                                )
+
+                                if desc:
+                                    logger.info("Found CVE description from cve_fetch_intel trace")
+                                    return desc.strip()
+
+                            except (TypeError, AttributeError):
                                 continue
-                            
-                            try:
-
-                                for intel_item in intel_list:
-                                    if intel_item.get("vuln_id") == cve_id:
-                                        # Priority: nvd > ghsa > rhsa
-                                        desc = (intel_item.get("nvd", {}).get("cve_description")
-                                                or intel_item.get("ghsa", {}).get("description")
-                                                or (intel_item.get("rhsa", {}).get("details", [""])[0] if isinstance(
-                                                    intel_item.get("rhsa", {}).get("details"), list) else ""))
-
-                                        if desc:
-                                            logger.info("Found CVE description from cve_fetch_intel trace")
-                                            return desc.strip()
-
-                            except json.JSONDecodeError as e:
-                                logger.debug("Failed to parse output.value JSON: %s", e)
-                                pass
 
                 except (KeyError, TypeError):
                     continue
@@ -778,9 +774,21 @@ class APIExtractor:
             return attrs.get(key, {}).get("stringValue", "")
         
         # Helper: Safe float conversion
-        def safe_float(value, default=0.0):
+        def safe_float(value, default=float('inf')):
+            """Convert to float, returning default for None/empty/invalid values."""
+            if value is None or value == "":
+                return default
             try:
-                return float(value) if value else default
+                return float(value)
+            except (ValueError, TypeError):
+                return default
+        
+        def safe_timestamp(value, default=None):
+            """Convert to float timestamp, None if invalid."""
+            if not value:
+                return default
+            try:
+                return float(value)
             except (ValueError, TypeError):
                 return default
         
@@ -801,7 +809,7 @@ class APIExtractor:
             
             return descendants
         
-        # Step 1: Collect checklist_question spans
+        # Step 1: Collect checklist_question spans with their question text
         checklist_spans = []
         for trace in traces:
             attrs = trace.get("spanPayload", {}).get("span_payload", {}).get("attributes", {})
@@ -811,19 +819,28 @@ class APIExtractor:
             event_type = get_attr_str(attrs, "nat.event_type")
             
             if func_name == "checklist_question" and event_type == "FUNCTION_START":
+                input_value = get_attr_str(attrs, "input.value")
+                
+                # Extract question text from input_value for matching
+                # Note: input_value might be plain text (truncated to ~80 chars) or JSON
+                question_text = ""
+                try:
+                    input_json = json.loads(input_value)
+                    question_text = input_json.get("question", input_json.get("input", ""))
+                except (json.JSONDecodeError, TypeError):
+                    # If not JSON, use the input_value directly (likely truncated text)
+                    question_text = input_value
+                
                 checklist_spans.append({
-                    "span_id": metadata.get("span_id", "")[:16],
+                    "span_id": (metadata.get("span_id") or "")[:16],
                     "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+                    "question_text": question_text.strip() if question_text else "",
                 })
-        
-        # Sort by time to ensure order
-        checklist_spans.sort(key=lambda s: safe_float(s.get("start_time")))
         
         logger.info("Collected %d checklist_question spans", len(checklist_spans))
         
         # Step 2: Collect all agent spans and build parent index
         parent_to_children = {}
-        
         for trace in traces:
             attrs = trace.get("spanPayload", {}).get("span_payload", {}).get("attributes", {})
             metadata = trace.get("spanPayload", {}).get("span_payload", {}).get("metadata", {})
@@ -832,46 +849,72 @@ class APIExtractor:
             subspan_name = get_attr_str(attrs, "nat.subspan.name")
             event_type = get_attr_str(attrs, "nat.event_type")
             
-            span_id = metadata.get("span_id", "")[:16]
-            parent_span_id = metadata.get("parent_span_id", "")[:16]
+            span_id = (metadata.get("span_id") or "")[:16]
+            parent_span_id = (metadata.get("parent_span_id") or "")[:16]
+
+            if not span_id:
+                continue
             
-            # Collect agent spans (thought/observation/tool)
-            if func_name in NODE_FUNCTION_NAMES:
-                span_data = {
-                    "span_id": span_id,
-                    "parent_span_id": parent_span_id,
-                    "function_name": func_name,
-                    "subspan_name": subspan_name,
-                    "span_kind": "FUNCTION",
-                    "event_type": event_type,
-                    "input_value": get_attr_str(attrs, "input.value"),
-                    "output_value": get_attr_str(attrs, "output.value"),
-                    "start_time": get_attr_str(attrs, "nat.event_timestamp"),
-                    "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
-                    "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
-                }
-                parent_to_children.setdefault(parent_span_id, []).append(span_data)
+            is_llm_thought = event_type == "LLM_START" and func_name in ("checklist_question", "thought node")
+            is_displayable = func_name in NODE_FUNCTION_NAMES or event_type == "TOOL_START" or is_llm_thought
             
-            elif event_type == "TOOL_START":
-                span_data = {
-                    "span_id": span_id,
-                    "parent_span_id": parent_span_id,
-                    "function_name": subspan_name or func_name,
-                    "subspan_name": subspan_name,
-                    "span_kind": "TOOL",
-                    "event_type": event_type,
-                    "input_value": get_attr_str(attrs, "input.value"),
-                    "output_value": get_attr_str(attrs, "output.value"),
-                    "start_time": get_attr_str(attrs, "nat.event_timestamp"),
-                    "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
-                    "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
-                }
-                parent_to_children.setdefault(parent_span_id, []).append(span_data)
-        
+            span_data = {
+                "span_id": span_id,
+                "parent_span_id": parent_span_id,
+                "function_name": subspan_name if event_type == "TOOL_START" else func_name,
+                "subspan_name": subspan_name,
+                "span_kind": "TOOL" if event_type == "TOOL_START" else ("LLM" if is_llm_thought else "FUNCTION"),
+                "event_type": event_type,
+                "displayable": is_displayable,
+                "input_value": get_attr_str(attrs, "input.value"),
+                "output_value": get_attr_str(attrs, "output.value"),
+                "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+                "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
+                "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
+            }
+            parent_to_children.setdefault(parent_span_id, []).append(span_data)
+            
+            # # Collect agent spans (thought/observation/tool)
+            # if func_name in NODE_FUNCTION_NAMES:
+            #     span_data = {
+            #         "span_id": span_id,
+            #         "parent_span_id": parent_span_id,
+            #         "function_name": func_name,
+            #         "subspan_name": subspan_name,
+            #         "span_kind": "FUNCTION",
+            #         "event_type": event_type,
+            #         "input_value": get_attr_str(attrs, "input.value"),
+            #         "output_value": get_attr_str(attrs, "output.value"),
+            #         "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+            #         "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
+            #         "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
+            #     }
+            #     parent_to_children.setdefault(parent_span_id, []).append(span_data)
+            
+            # elif event_type == "TOOL_START":
+            #     span_data = {
+            #         "span_id": span_id,
+            #         "parent_span_id": parent_span_id,
+            #         "function_name": subspan_name or func_name,
+            #         "subspan_name": subspan_name,
+            #         "span_kind": "TOOL",
+            #         "event_type": event_type,
+            #         "input_value": get_attr_str(attrs, "input.value"),
+            #         "output_value": get_attr_str(attrs, "output.value"),
+            #         "start_time": get_attr_str(attrs, "nat.event_timestamp"),
+            #         "token_prompt": attrs.get("llm.token_count.prompt", {}).get("intValue", 0),
+            #         "token_completion": attrs.get("llm.token_count.completion", {}).get("intValue", 0),
+            #     }
+            #    parent_to_children.setdefault(parent_span_id, []).append(span_data)
         logger.info("Built parent index with %d unique parents", len(parent_to_children))
+        logger.info("parent_to_children keys (first 10): %s", list(parent_to_children.keys())[:10])
+        logger.info("checklist_spans span_ids: %s", [s['span_id'] for s in checklist_spans])
         
-        # Step 3: Match checklist_items to checklist_question spans by order
+        # Step 3: Match checklist_items to checklist_question spans by question text
         investigation_steps = []
+        
+        # Create a set to track which spans have been matched
+        matched_span_ids = set()
         
         for i, checklist_item in enumerate(checklist_items, 1):
             question = checklist_item.get("input", "")
@@ -880,16 +923,45 @@ class APIExtractor:
             if not question:
                 continue
             
-            # Match by order (i-1 because enumerate starts at 1)
-            if i - 1 < len(checklist_spans):
-                cq_span_id = checklist_spans[i - 1]["span_id"]
+            # Find the matching span by comparing question text
+            # Note: span question_text might be truncated (~80 chars)
+            question_key = question.strip().lower()
+            matched_span = None
+            
+            for span in checklist_spans:
+                if span["span_id"] in matched_span_ids:
+                    continue  # Skip already matched spans
+                
+                span_question_key = span["question_text"].lower()
+                
+                # Match using the shorter of the two lengths (since span text might be truncated)
+                match_len = min(len(question_key), len(span_question_key), 75)  # Use up to 75 chars
+                
+                if span_question_key and match_len > 20:  # Need at least 20 chars for reliable match
+                    if question_key[:match_len] == span_question_key[:match_len]:
+                        matched_span = span
+                        matched_span_ids.add(span["span_id"])
+                        logger.debug("Matched question %d to span %s by text (matched %d chars)", 
+                                   i, span["span_id"], match_len)
+                        break
+            
+            # Fallback: If no match found by text and we have remaining unmatched spans, match by order
+            if not matched_span and i - 1 < len(checklist_spans):
+                remaining_spans = [s for s in checklist_spans if s["span_id"] not in matched_span_ids]
+                if remaining_spans:
+                    matched_span = remaining_spans[0]
+                    matched_span_ids.add(matched_span["span_id"])
+                    logger.warning("No text match for question %d, falling back to order-based match: %s", 
+                                 i, matched_span["span_id"])
+            
+            if matched_span:
+                cq_span_id = matched_span["span_id"]
                 
                 # Recursively collect all descendant spans
                 all_descendants = collect_descendants(cq_span_id, parent_to_children)
-                
+                all_descendants = [s for s in all_descendants if s.get("displayable")]
                 # Sort by time
-                all_descendants.sort(key=lambda s: safe_float(s.get("start_time", "")))
-                
+                all_descendants.sort(key=lambda s: safe_float(s.get("start_time")))                
                 logger.debug("Question %d: Collected %d descendant spans", i, len(all_descendants))
                 
                 # Build tool_calls for backward compatibility
@@ -944,6 +1016,14 @@ class APIExtractor:
         Returns:
             List of ToolCall objects
         """
+        # Build span maps for efficient lookup
+        span_by_id = {s["span_id"]: s for s in spans if "span_id" in s}
+        children_by_parent = {}
+        for s in spans:
+            if "parent_span_id" in s and s.get("parent_span_id"):
+                parent_id = s["parent_span_id"]
+                children_by_parent.setdefault(parent_id, []).append(s)
+        
         tool_calls = []
         current_thought = ""
         current_reason = ""
@@ -953,37 +1033,28 @@ class APIExtractor:
             func_name = span["function_name"]
             span_kind = span.get("span_kind", "FUNCTION")
             
-            if func_name == "thought node":
-                # Extract thought and actions (including reason)
-                # Only process "full" thought nodes that have actual thought content
-                # Skip "simple" thought nodes that only have mode/step (length < 50)
-                output_value = span.get("output_value", "{}")
+            if func_name == "thought node" or span_kind == "LLM":
+                output_val = span.get("output_value", "{}")
                 
-                if len(output_value) < 50:
-                    # Skip simple thought nodes like {"mode": "act", "step": 1}
+                if len(output_val) < 50:
                     continue
                 
                 try:
-                    thought_json = json.loads(output_value)
+                    thought_json = json.loads(output_val)
                     current_thought = thought_json.get("thought", "")
-                    # Extract actions (tool, reason, etc.)
                     actions = thought_json.get("actions") or {}
                     current_reason = actions.get("reason", "")
                 except json.JSONDecodeError:
-                    # If JSON parse fails, try to extract from string representation
-                    current_thought = output_value
+                    current_thought = output_val
                     current_reason = ""
-                    
-                    # Try to extract thought and reason from malformed JSON string
-                    if "thought" in output_value and "reason" in output_value:
+                    if "thought" in output_val and "reason" in output_val:
                         try:
-                            # Attempt to fix common JSON issues
                             import ast
-                            parsed = ast.literal_eval(output_value)
+                            parsed = ast.literal_eval(output_val)
                             if isinstance(parsed, dict):
-                                current_thought = parsed.get("thought", output_value)
+                                current_thought = parsed.get("thought", output_val)
                                 current_reason = parsed.get("actions") or {}.get("reason", "")
-                        except:
+                        except (ValueError, SyntaxError):
                             pass
             
             elif span_kind == "TOOL":
@@ -993,39 +1064,54 @@ class APIExtractor:
                 
                 # Find next observation node for output
                 tool_output = ""
-                for j in range(idx + 1, min(idx + 5, len(spans))):  # Check next 4 spans
+                for j in range(idx + 1, min(idx + 10, len(spans))):  # Check next 10 spans (increased from 5)
                     if spans[j]["function_name"] == "observation node":
                         obs_span = spans[j]
                         output_value = obs_span.get("output_value", "")
                         
-                        # Skip if output_value is empty or too short (likely metadata only)
-                        if not output_value or len(output_value) < 50:
-                            continue
+                        # Try to extract results from this observation span
+                        obs_results = None
                         
-                        try:
-                            obs_json = json.loads(output_value)
-                            
-                            # Check if it has results (the actual tool output)
-                            if "results" in obs_json:
-                                results = obs_json.get("results", [])
-                                if isinstance(results, list) and len(results) > 0:
-                                    tool_output = "\n".join(str(r)[:2000] for r in results[:5])
-                                    break  # Found the real output
-                                elif results:  # Non-empty results (not a list)
-                                    tool_output = str(results)[:2000]
-                                    break
-                            
-                            # If no results but has content field or other meaningful data
-                            elif len(output_value) > 100:  # Substantial content
-                                # This might be the actual output in a different format
-                                tool_output = output_value[:2000]
+                        # First, try the observation span itself
+                        if output_value and len(output_value) >= 50:
+                            try:
+                                obs_json = json.loads(output_value)
+                                if "results" in obs_json:
+                                    obs_results = obs_json.get("results", [])
+                            except json.JSONDecodeError:
+                                pass
+                        
+                        # If no results found, check child spans (LLM_START observation nodes)
+                        if not obs_results:
+                            obs_span_id = obs_span.get("span_id")
+                            if obs_span_id and obs_span_id in children_by_parent:
+                                for child_span in children_by_parent[obs_span_id]:
+                                    # Check if child is an LLM observation node with results
+                                    if (child_span.get("function_name") == "observation node" and 
+                                        child_span.get("event_type") == "LLM_START"):
+                                        child_output = child_span.get("output_value", "")
+                                        if child_output:
+                                            try:
+                                                child_json = json.loads(child_output)
+                                                if "results" in child_json:
+                                                    obs_results = child_json.get("results", [])
+                                                    break  # Found results in child span
+                                            except json.JSONDecodeError:
+                                                pass
+                        
+                        # If we found results, format and use them
+                        if obs_results:
+                            if isinstance(obs_results, list) and len(obs_results) > 0:
+                                tool_output = "\n".join(str(r)[:2000] for r in obs_results[:5])
+                                break  # Found the real output
+                            elif obs_results:  # Non-empty results (not a list)
+                                tool_output = str(obs_results)[:2000]
                                 break
-                                
-                        except json.JSONDecodeError:
-                            # If can't parse as JSON but has substantial content
-                            if len(output_value) > 100:
-                                tool_output = output_value[:2000]
-                                break
+                        
+                        # If no results but observation has substantial content
+                        elif output_value and len(output_value) > 100:
+                            tool_output = output_value[:2000]
+                            break
                 
                 # If still no output found, mark as empty
                 if not tool_output:
