@@ -159,7 +159,7 @@ def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float 
         INPUT: A CVE investigation checklist question
         ACTUAL OUTPUT: The agent's investigation trace and final answer
 
-        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
+        In your reasoning, cite specific evidence from the output to justify your score.
 
         EVALUATION DIMENSIONS:
 
@@ -177,20 +177,25 @@ def create_answer_quality_metric(judge_model: DeepEvalBaseLLM, threshold: float 
 
         SCORING RUBRIC:
 
+        IMPORTANT - ABSENCE OF EVIDENCE IS VALID:
+        In CVE analysis, confirming that a vulnerable package/function is NOT present
+        in the codebase is a legitimate and valuable finding. Do NOT penalize an agent
+        for reaching an "absence" conclusion if it genuinely searched and found nothing.
+
         Score 0.0-0.2 (FAIL):
-        - Answer doesn't address the question OR
-        - No evidence provided, claims made without verification
-        - "I don't know" without investigation attempt
+        - Agent gives a definitive answer that is NOT supported by any tool output
+        (hallucinated answer - claims something exists/doesn't exist without evidence)
+        - Answer directly contradicts the trace observations
 
         Score 0.3-0.4 (POOR):
-        - Answer tangentially related to question
-        - Single source only, no verification
-        - Vague claims without specific citations
+        - Agent investigated but gave up ("I don't know") after attempting 1-2 searches
+        - Answer acknowledges uncertainty but provides some rationale from search results
 
-        Score 0.5-0.6 (ADEQUATE):
-        - Answer addresses question but incompletely
-        - Some evidence provided, basic citations
-        - At least 2 sources consulted
+        Score 0.5-0.6 (ADEQUATE - includes valid "not found" conclusions):
+        - Agent performed multiple searches, package/function was not found
+        - Agent correctly concludes absence based on failed searches
+        - Answer acknowledges uncertainty where appropriate
+        - No specific file citations needed when nothing was found
 
         Score 0.7-0.8 (GOOD):
         - Answer clearly addresses the question
@@ -234,7 +239,7 @@ def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: flo
         The trace shows a sequence of reasoning steps. Each step shows what the agent
         thought, why it chose that approach, and what it discovered.
 
-        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
+        In your reasoning, cite specific evidence from the output to justify your score.
 
         EVALUATION DIMENSIONS:
 
@@ -245,6 +250,11 @@ def create_reasoning_quality_metric(judge_model: DeepEvalBaseLLM, threshold: flo
         - Does the final conclusion follow from accumulated evidence?
         - Do the Reasons explain why each step is necessary?
         - VALORIZE PIVOTING: If a tool returns 'no results found', it is logically sound for the agent to change its search strategy (e.g., from a specific module path to a broader keyword). Do not penalize these shifts as 'lack of focus'.
+        - CREDIT EXHAUSTION: If the agent tried multiple search strategies, 
+        found nothing each time, and correctly concluded absence of the package,
+        this IS logically coherent reasoning. Do not penalize for "repeating 
+        the same conclusion" when that conclusion is supported by consistent 
+        negative evidence across multiple searches.
 
         B. GOAL FOCUS (50% weight):
         - Does each step progress toward answering the question?
@@ -304,8 +314,8 @@ def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold
 
         {TOOL_DESCRIPTIONS}
 
-        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
-
+        In your reasoning, cite specific evidence from the output to justify your score.
+        
         EVALUATION CRITERIA (SEMANTIC ONLY - syntax is evaluated separately):
 
         1. TOOL APPROPRIATENESS (40% weight):
@@ -339,12 +349,23 @@ def create_tool_selection_quality_metric(judge_model: DeepEvalBaseLLM, threshold
         IMPORTANT: Do NOT penalize for syntax errors (wrong format, missing fields).
         That is evaluated separately by Tool Call Integrity metric.
 
+        SPECIAL CASE - CONFIRMED PACKAGE ABSENCE:
+        If the agent's keyword searches confirm the target package or module is NOT
+        present in the codebase:
+        - Function Locator and Call Chain Analyzer are NOT required (they would fail anyway)
+        - Using keyword search to confirm absence is the CORRECT approach
+        - Appropriate score: 0.4-0.6 depending on search thoroughness
+        - Do NOT penalize for skipping function-level tools when package is absent
+        - DO penalize if the agent only did 1 search, or searched for the wrong thing
+
         SCORING RUBRIC:
 
         Score 0.0-0.3 (FAIL):
         - Wrong tools for the task (semantic mismatch)
         - Violates dependencies (Call Chain before Locator)
         - Searches for completely irrelevant things
+        - NOTE: Do NOT apply this score solely because Function Locator/Call Chain
+        Analyzer were not used — see SPECIAL CASE above.
 
         Score 0.4-0.6 (ADEQUATE):
         - Mostly appropriate tools but suboptimal sequence
@@ -385,8 +406,8 @@ def create_tool_call_integrity_metric(judge_model: DeepEvalBaseLLM, threshold: f
 
         {TOOL_DESCRIPTIONS}
 
-        In your reasoning, explicitly reference the specific requirements of this criteria. Use the format: 'The response [meets/fails] the [Specific Criteria Name] because [Evidence from Output], which directly relates to the requirement of [Specific Clause from Criteria].
-
+        In your reasoning, cite specific evidence from the output to justify your score.
+        
         EVALUATION CRITERIA (SYNTAX ONLY, NOT SEMANTIC):
 
         1. SCHEMA ADHERENCE (30%):
@@ -396,7 +417,6 @@ def create_tool_call_integrity_metric(judge_model: DeepEvalBaseLLM, threshold: f
         - Are field types correct (string vs object)?
 
         2. FORMAT CORRECTNESS (30%):
-        - Is JSON properly formatted (no malformed brackets, quotes)?
         - Are special characters properly escaped?
         - No syntax errors that would prevent tool execution?
         - Proper string formatting without embedded control characters?
@@ -557,8 +577,10 @@ class InvestigationMetricSuite:
         
         for span in raw_spans:
             fn = span["function_name"]
+            span_kind = span.get("span_kind", "FUNCTION")
             
-            if fn == "thought node":
+            # Match both "thought node" (legacy) and LLM spans (current LangGraph format)
+            if fn == "thought node" or span_kind == "LLM":
                 output_val = span.get("output_value", "")
                 try:
                     thought_json = json.loads(output_val)
